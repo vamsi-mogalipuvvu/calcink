@@ -22,12 +22,12 @@ import '@fontsource/caveat/600.css';
 import './style.css';
 import { InkCanvas } from './canvas/inkCanvas.js';
 import type { ToolMode } from './canvas/inkCanvas.js';
-import { AnswerOverlay, confidenceLevel } from './canvas/answerOverlay.js';
-import type { ConfidenceMark } from './canvas/answerOverlay.js';
+import { AnswerOverlay } from './canvas/answerOverlay.js';
 import { getRecognitionBridge } from './recognition/index.js';
 import type { DebugGroup } from './recognition/index.js';
-import { groupStrokes, splitIntoLines, bboxHeight, bboxWidth } from './recognition/grouper.js';
-import { evaluate, formatResult } from './math/evaluator.js';
+import { computeAnswers } from './recognition/answers.js';
+import { groupStrokes } from './recognition/grouper.js';
+import { evaluate } from './math/evaluator.js';
 import type { Stroke } from './canvas/stroke.js';
 import { buzz, chime, haptic, isFeedbackEnabled, setFeedbackEnabled, swish } from './ui/feedback.js';
 
@@ -202,61 +202,7 @@ function processExpression(
     return;
   }
 
-  const lines = splitIntoLines(allGroups);
-  const answers: import('./canvas/answerOverlay.js').AnswerEntry[] = [];
-  const marks: ConfidenceMark[] = [];
-
-  for (const lineGroups of lines) {
-    // Build this line's symbol sequence using debug[] for symbols,
-    // allGroups[] for bounding boxes.
-    const lineGroupsSorted = [...lineGroups].sort((a, b) => a.cx - b.cx);
-    const allGroupsSorted  = [...allGroups].sort((a, b) => a.cx - b.cx);
-
-    let equalsGroup: typeof allGroups[0] | null = null;
-    const lineSymbols: string[] = [];
-    const lineItems: Array<{ group: typeof allGroups[0]; symbol: string; debug: DebugGroup }> = [];
-
-    for (const lineGroup of lineGroupsSorted) {
-      // Find this group's global index (= debug array index)
-      const gIdx = allGroupsSorted.indexOf(lineGroup);
-      const dbg  = gIdx >= 0 && gIdx < debug.length ? debug[gIdx] : undefined;
-      if (dbg?.dropped) continue; // stray dot filtered by the worker
-      const sym  = dbg ? dbg.symbol : '?';
-      lineSymbols.push(sym);
-      if (dbg) lineItems.push({ group: lineGroup, symbol: sym, debug: dbg });
-      if (sym === '=') equalsGroup = lineGroup;
-    }
-
-    const equalsIdx = lineSymbols.lastIndexOf('=');
-    if (!equalsGroup || equalsIdx <= 0) continue;
-
-    const exprForLine = lineSymbols.slice(0, equalsIdx).join('');
-    const evalResult  = evaluate(exprForLine);
-    const answerText  = evalResult.ok
-      ? formatResult(evalResult.value)
-      : (evalResult.error === 'Undefined' ? 'Undefined' : '?');
-
-    const heights  = lineGroupsSorted.map(g => bboxHeight(g.bbox)).sort((a, b) => a - b);
-    const medianH  = heights[Math.floor(heights.length / 2)] ?? 30;
-    const pos      = AnswerOverlay.answerPosition(
-      equalsGroup.bbox,
-      parseFloat(strokeWidthInput.value),
-    );
-
-    answers.push({ x: pos.x, y: pos.y, text: answerText, symbolHeight: medianH });
-
-    if (confidenceEnabled) {
-      for (const item of lineItems) {
-        const bb = item.group.bbox;
-        marks.push({
-          x: (bb.minX + bb.maxX) / 2,
-          y: bb.maxY + 8,
-          w: Math.min(bboxWidth(bb), 40),
-          level: confidenceLevel(item.debug.confidence ?? 0.5),
-        });
-      }
-    }
-  }
+  const { answers, marks } = computeAnswers(allGroups, debug, parseFloat(strokeWidthInput.value));
 
   answerOverlay.setAnswers(answers);
   answerOverlay.setMarks(confidenceEnabled ? marks : []);
