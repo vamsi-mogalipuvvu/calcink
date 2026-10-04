@@ -38,9 +38,10 @@ export class RecognitionBridge {
   onReady?: () => void;
 
   constructor() {
-    // Vite will bundle this worker as a separate chunk automatically
+    // Vite detects the new URL(..., import.meta.url) pattern and bundles
+    // the worker as a separate chunk. Use the .ts source path.
     this.worker = new Worker(
-      new URL('./worker.js', import.meta.url),
+      new URL('./worker.ts', import.meta.url),
       { type: 'module' },
     );
     this.worker.addEventListener('message', this._handleMessage);

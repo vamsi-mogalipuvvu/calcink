@@ -18,17 +18,18 @@
  *   { type: 'READY' }
  */
 
-import * as ort from 'onnxruntime-web';
+import * as ort from 'onnxruntime-web/all';
 import type { Stroke } from '../canvas/stroke.js';
 import { groupStrokes, bboxHeight } from './grouper.js';
 import { classifyOperator } from './operatorClassifier.js';
 import { preprocessSymbol } from './preprocessor.js';
 
-// ── ORT WASM path config ──────────────────────────────────────
-// Point to the locally bundled WASM files in /public/ort-wasm/
-// so no network request is ever needed.
-ort.env.wasm.wasmPaths = '/ort-wasm/';
-ort.env.wasm.numThreads = 1; // Use single-threaded WASM for simplicity
+// ── ORT WASM path config ─────────────────────────────────────────────────────
+// We use the /ort-wasm/ path in public/ (bundled locally, no network needed).
+// Setting wasmPaths as an absolute URL makes it worker-context-safe.
+ort.env.wasm.numThreads = 1;   // single-thread: no SharedArrayBuffer/COEP needed
+ort.env.wasm.proxy     = false; // already in a worker, no proxy needed
+
 
 // ── State ─────────────────────────────────────────────────────
 
