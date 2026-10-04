@@ -1,79 +1,91 @@
-# CalcInk – Model Report
+See README.md for the full architecture.
+
+# CalcInk Model Report
 
 ## Recognition Architecture
 
-CalcInk uses a **two-stage hybrid classifier** to recognise all 16 symbols
-(`0–9 + − × ÷ . =`) entirely client-side with no network requests.
+CalcInk uses a two-stage hybrid recognizer for the project vocabulary:
 
----
+`0-9`, `+`, `-`, `x`, division, `.`, and `=`.
 
-## Stage 1 – MNIST Digit Model (0–9)
+All recognition runs client-side in `src/recognition/worker.ts`. The worker loads the bundled MNIST-12 ONNX model once from `/models/mnist-12.onnx`, groups incoming strokes, classifies each group, applies stray-dot postprocessing, and returns both the expression string and per-group debug data.
+
+## Stage 1: MNIST Digit Model
 
 | Field | Value |
 |---|---|
-| **Model name** | MNIST-12 |
-| **Source** | [ONNX Model Zoo – MNIST](https://github.com/onnx/models/tree/main/validated/vision/classification/mnist) |
-| **License** | MIT |
-| **Architecture** | 2-layer CNN (Conv → ReLU → MaxPool × 2 → FC → Softmax) |
-| **Input shape** | `[1, 1, 28, 28]` — grayscale, white-on-black, values 0.0–1.0 |
-| **Output** | 10 logits → softmax → digit `0`–`9` |
-| **File** | `public/models/mnist-12.onnx` (26 KB) |
-| **Inference runtime** | `onnxruntime-web` 1.x, WASM backend |
-| **Where it runs** | Web Worker (`src/recognition/worker.ts`) — never on the main thread |
+| Model name | MNIST-12 |
+| Source | ONNX Model Zoo MNIST: https://github.com/onnx/models/tree/main/validated/vision/classification/mnist |
+| License | MIT |
+| Architecture | Small CNN with alternating convolution/max-pool blocks, trained in CNTK per the CNTK 103D tutorial. |
+| Input shape | `[1, 1, 28, 28]`, grayscale white-on-black, values `0.0` to `1.0` |
+| Output | 10 logits, converted by CalcInk to softmax probabilities for digits `0`-`9` |
+| File | `public/models/mnist-12.onnx` |
+| Size | 26 KB |
+| Reported error | 1.1% top-1 error on MNIST |
+| Runtime | `onnxruntime-web` WASM backend inside a Web Worker |
 
-### Preprocessing pipeline
+### Preprocessing Pipeline
 
-1. Render strokes to `OffscreenCanvas` (112×112) — white ink, black background  
-2. Downscale to 28×28 with bilinear interpolation (`drawImage`)  
-3. Extract red channel, normalise to `[0.0, 1.0]`  
-4. Wrap in `Float32Array` shape `[1, 1, 28, 28]`
+1. The worker receives vector strokes as CSS-pixel `{ x, y, t, pressure }` points.
+2. `preprocessSymbol()` renders each symbol group to a 112x112 `OffscreenCanvas`.
+3. Strokes are drawn as white ink on a black background.
+4. Input points are smoothed with two moving-average passes when there are at least five points.
+5. The renderer uses 15% padding and a fixed stroke width equal to 10% of the 112px render size; it does not scale the model ink width from the user's pen width.
+6. The 112x112 image is downscaled to 28x28 with canvas image smoothing.
+7. The red channel is divided by 255 into a `Float32Array`.
+8. `centerByMass()` shifts the 28x28 tensor toward the MNIST center of mass at `(13.5, 13.5)`.
+9. ONNX Runtime receives the tensor with shape `[1, 1, 28, 28]`.
 
-Stroke width is scaled proportionally to the symbol bounding box size so thin
-and thick handwriting produce comparably thick rendered glyphs.
+## Stage 2: Geometry Operator Classifier
 
----
+Operators are recognized with relative geometry in `src/recognition/operatorClassifier.ts`.
 
-## Stage 2 – Geometry Operator Classifier (+  −  ×  ÷  .  =)
-
-A hand-written rule classifier that uses **relative geometry only** (no absolute
-pixel values, fully resolution-independent):
-
-| Symbol | Rules |
+| Symbol | Current rule summary |
 |---|---|
-| `.` | Single stroke, height < 25% of median line height |
-| `−` | Single stroke, aspect ratio > 1.6, angle < 30° (flat) |
-| `=` | Two strokes, both flat, vertically separated 15%–85% of group height, each spanning ≥ 40% of group width |
-| `+` | Two strokes: one flat + one steep, crossing bboxes; OR single stroke with ≥1 direction reversal in each axis |
-| `×` | Two strokes, both diagonal (25°–65°), crossing bboxes, angles opposite sign |
-| `÷` | Three strokes: one flat bar spanning ≥ 35% of width, two small dots above and below the bar |
+| `.` | Single tiny stroke with relative height `< 0.25` and aspect ratio between `0.4` and `2.5`, or a very small bbox. |
+| `-` | Single wide flat stroke: aspect ratio `> 1.6`, angle near horizontal, and height `< 0.4 * medianLineHeight`. |
+| `=` | Two strokes, both flat, vertical separation `> 5%` and `< 200%` of group width, each spanning `> 40%` of group width. |
+| `+` | Two crossing strokes where one is flat and one is steep; a weaker single-stroke plus rule also exists. |
+| `x` | Two crossing diagonal strokes with diagonal angles and sufficient angle difference/opposite sign. |
+| Division | Three strokes: one flat bar spanning `> 35%` of group width plus one small dot above and one below. |
 
-### Known confusion handling
+The worker accepts multi-stroke operator results at confidence `>= 0.80` and single-stroke quick operator results at confidence `>= 0.88`. MNIST digit results are accepted at confidence `>= 0.65`; low-confidence digit results can fall back to an operator result.
 
-| Confusion | Resolution |
-|---|---|
-| `1` vs `−` | MNIST handles `1` (tall/narrow); `−` requires aspect ratio > 1.6 AND short height |
-| `.` vs small `0` | Operator classifier fires first for very small strokes; MNIST takes over if relSize ≥ 0.25 |
-| `+` vs `×` | `+` has one horizontal + one vertical stroke; `×` requires both strokes to be diagonal |
-| `=` vs two separate `−` | Grouped only if written within 800ms and bboxes close; two far-apart minus signs form separate groups |
+## Stroke Grouping
 
----
+Grouping is spatial-first and time-secondary in `src/recognition/grouper.ts`.
 
-## Why the Hybrid Approach?
+- Strokes are sorted by start time.
+- Each new stroke scans the last 3 groups for the best merge candidate.
+- The general spatial gate requires horizontal overlap of at least 30% of the narrower bbox width and a vertical gap no larger than 55% of the reference width.
+- The grouping time limit is 4 seconds.
+- A special stacked-flat-stroke gate handles `=`: both boxes must be flat, widths comparable, horizontal overlap at least 60%, and vertical gap no larger than `1.5x` the wider stroke width.
+- A post-pass also merges consecutive single-stroke flat groups that satisfy the same strong-overlap and `1.5x` width gap rule.
+- Side-by-side minus signs do not merge because they fail the horizontal-overlap gate.
+
+## Postprocessing
+
+`strayDotMask()` removes stray decimal dots before forming the final expression. A `.` is kept only when both neighboring symbols are digits. The worker keeps all debug groups and marks filtered groups with `dropped: true` so answer placement remains aligned with the original stroke groups.
+
+## Why The Hybrid Approach
 
 | Reason | Details |
 |---|---|
-| **No ONNX model covers all 16 symbols** | After exhaustive search of Hugging Face, ONNX Model Zoo, and GitHub, no single pre-trained, downloadable ONNX/TF.js model exists that covers `0–9 + − × ÷ . =` in a browser-deployable size. |
-| **Operators have strong geometric signatures** | `+`, `×`, `=`, `÷`, `−`, `.` are structurally distinct from digits — stroke count, aspect ratio, and crossing topology reliably distinguish them without ML. This is the same approach used in MyScript and similar commercial solutions. |
-| **MNIST is the best available pre-trained model** | MIT-licensed, 26 KB, well-tested on 70,000 digit images, available as ready-to-download ONNX from the ONNX Model Zoo. Digit recognition accuracy on standard MNIST test set: **~99.3%**. |
-| **Size budget** | MNIST: 26 KB. ORT WASM: ~14 MB (bundled). Total addition: ~14 MB — acceptable for a hackathon PWA. |
-
----
+| Browser/offline fit | MNIST-12 is small, bundled, and runs through ONNX Runtime Web in a worker. |
+| Operator geometry is strong | Operators in this vocabulary are largely separable by stroke count, aspect ratio, crossing structure, and relative dot/bar placement. |
+| No training required | The digit model is pre-trained; operator rules are deterministic and local to the app. |
+| Position preservation | Symbol grouping keeps bounding boxes, allowing answers to be placed next to the terminal `=` on the canvas. |
 
 ## Alternatives Rejected
 
-| Model | Reason for rejection |
+| Model/resource | Reason |
 |---|---|
-| `fhswf/TrOCR_Math_handwritten` (HF) | 400MB+, designed for full-expression LaTeX generation, not isolated symbol classification |
-| HASYv2 CNNs (GitHub) | Training code exists, but no hosted pre-trained ONNX weights |
-| EMNIST | Digits + letters only; no math operators |
-| `TGrote11/Handwriting_Math_Classification` (HF) | Model page exists but weights are inaccessible / not downloadable |
+| `nikkii03/Handwritten_Maths_Evaluator` | Has useful weights, but no stated license for redistribution. |
+| `TGrote11/Handwriting_Math_Classification` | Large 87.5M-parameter ViT and not suitable for this browser-sized target. |
+| `Yoshibansal/handwritten-mathematical-symbols` | MIT code/dataset work, but no published weights to bundle directly. |
+| `whywhs/Pytorch-HMER` | Whole-expression LaTeX recognizer, hard to port to this browser pipeline, and not designed to return symbol positions. |
+| `kimseungdae/ink-on` | Promising Apache-2.0 browser ONNX expression recognizer, but whole-expression output does not directly provide the `=` symbol position needed for inline answer placement. |
+| PosFormer / HMER GGUF variants | Wrong runtime format for this app and restrictive non-commercial licensing in some variants. |
+| TrOCR math variants | Too large for the offline browser budget. |
+| Plain MNIST/EMNIST models | Digits only; MNIST-12 is the smallest and best documented model already in ONNX form. |
