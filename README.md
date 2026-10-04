@@ -47,6 +47,14 @@ There is one ONNX Runtime WASM request in the production build; it is served fro
 | Fault tolerance | Malformed expressions show `?`; division by zero shows `Undefined`; stale recognition jobs are cancelled. |
 | Offline PWA | Vite PWA precaches HTML, JS, CSS, fonts, model, and WASM assets for offline reloads. |
 
+## Creative Extensions
+
+- Scratch-to-erase detects back-and-forth scribbles in `src/canvas/scratch.ts` and removes ink under the scratch without keeping the scribble stroke.
+- Confidence indicators underline recognized symbols with high/mid/low confidence marks on the answer overlay.
+- Audio and haptic feedback live in `src/ui/feedback.ts`, use generated WebAudio tones, and can be muted from the toolbar.
+- Answers fade in on the overlay canvas when a new result appears.
+- The pixel eraser edits stroke data directly, so erased ink stays erased through redraws, recognition, undo, and export-like stroke reads.
+
 ## Architecture
 
 ```text
@@ -124,16 +132,29 @@ A single small, license-clear, browser-ready model covering digits plus `+ - x /
 
 ## Testing
 
-Latest required verification: 117 tests passed.
+Latest required verification: 143 tests passed.
 
 | Test file | Coverage |
 |---|---|
-| `tests/math.test.ts` | Tokenization, Unicode and ASCII operators, precedence, decimals, unary minus, parentheses, division by zero, malformed input, formatting, and coordinate helper math. |
+| `tests/answers.test.ts` | Pure answer computation, dropped-symbol handling, multi-line answers, edit recomputation, error display, and answer placement. |
+| `tests/coords.test.ts` | Client-to-canvas conversion, CSS/physical pixel conversion, backing-store rounding, DPR variants, and round trips. |
+| `tests/feedback.test.ts` | Feedback enable state and no-throw behavior when audio or vibration APIs are unavailable. |
+| `tests/math.test.ts` | Tokenization, Unicode and ASCII operators, precedence, decimals, unary minus, parentheses, division by zero, malformed input, and formatting. |
+| `tests/overlay.test.ts` | Confidence-level thresholds for overlay marks. |
 | `tests/preprocess.test.ts` | Smoothing behavior and center-of-mass recentering. |
 | `tests/postprocess.test.ts` | Stray-dot filtering and dropped-debug alignment. |
 | `tests/recognition.test.ts` | Stroke grouping, line splitting, bbox helpers, operator classifier rules, confusion cases, and module import smoke test. |
+| `tests/scratch.test.ts` | Scratch gesture detection and stroke selection under scratch bounding boxes. |
 | `tests/stroke.test.ts` | Point densification used by the pixel eraser. |
 | `tests/setup.ts` | Node test polyfill for `OffscreenCanvas`. |
+
+## Recognition accuracy
+
+To be filled with measured results.
+
+## Performance measurements
+
+To be filled with measured results.
 
 ## Known Limitations
 
