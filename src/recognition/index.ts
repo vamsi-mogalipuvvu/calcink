@@ -18,6 +18,7 @@ export interface DebugGroup {
   symbol: string;
   cx: number;
   strokes: number;
+  confidence?: number;
   dropped?: boolean;
 }
 

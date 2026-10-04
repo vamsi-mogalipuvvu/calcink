@@ -105,7 +105,7 @@ async function runMNIST(
 // ── Main recognition pipeline ─────────────────────────────────
 
 /**
- * Classify one symbol group → returns the symbol character string.
+ * Classify one symbol group → returns the symbol character string and confidence.
  * Hybrid: try geometry (operator) first for multi-stroke groups or
  * groups with low MNIST confidence; fall back to MNIST for digits.
  */
@@ -113,34 +113,34 @@ async function classifyGroup(
   group: import('./grouper.js').SymbolGroup,
   medianHeight: number,
   penWidth: number,
-): Promise<string> {
+): Promise<{ symbol: string; confidence: number }> {
 
   // 1. Always try operator classifier for multi-stroke groups
   if (group.strokes.length > 1) {
     const opResult = classifyOperator(group, medianHeight);
     if (opResult && opResult.confidence >= 0.80) {
-      return opResult.symbol;
+      return { symbol: opResult.symbol, confidence: opResult.confidence };
     }
   }
 
   // 2. Try operator classifier for single-stroke operators (., −)
   const quickOp = classifyOperator(group, medianHeight);
   if (quickOp && quickOp.confidence >= 0.88) {
-    return quickOp.symbol;
+    return { symbol: quickOp.symbol, confidence: quickOp.confidence };
   }
 
   // 3. Run MNIST digit model
   const digitResult = await runMNIST(group.strokes, group.bbox, penWidth);
 
   if (digitResult && digitResult.confidence >= DIGIT_CONFIDENCE_THRESHOLD) {
-    return digitResult.label;
+    return { symbol: digitResult.label, confidence: digitResult.confidence };
   }
 
   // 4. Low MNIST confidence → fall back to operator with any result
-  if (quickOp) return quickOp.symbol;
-  if (digitResult) return digitResult.label;
+  if (quickOp) return { symbol: quickOp.symbol, confidence: quickOp.confidence };
+  if (digitResult) return { symbol: digitResult.label, confidence: digitResult.confidence };
 
-  return '?';
+  return { symbol: '?', confidence: 0.5 };
 }
 
 async function recognizeStrokes(
@@ -166,13 +166,18 @@ async function recognizeStrokes(
     const medianH = heights[Math.floor(heights.length / 2)] ?? 20;
 
     const symbols: string[] = [];
-    const debug: Array<{ symbol: string; cx: number; strokes: number }> = [];
+    const debug: Array<{ symbol: string; cx: number; strokes: number; confidence: number }> = [];
 
     for (const group of groups) {
       if (currentJobId !== id) return;
-      const sym = await classifyGroup(group, medianH, penWidth);
+      const { symbol: sym, confidence } = await classifyGroup(group, medianH, penWidth);
       symbols.push(sym);
-      debug.push({ symbol: sym, cx: Math.round(group.cx), strokes: group.strokes.length });
+      debug.push({
+        symbol: sym,
+        cx: Math.round(group.cx),
+        strokes: group.strokes.length,
+        confidence: Math.round(confidence * 100) / 100,
+      });
     }
 
     if (currentJobId !== id) return;

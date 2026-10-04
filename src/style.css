@@ -201,6 +201,13 @@ body {
   box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.4);
 }
 
+.tool-btn.toggle-off,
+.tool-btn[aria-pressed="false"].toggle {
+  background: transparent;
+  color: var(--toolbar-text);
+  box-shadow: none;
+}
+
 /* Danger variant (Clear) */
 .tool-btn.danger {
   color: #f38ba8;

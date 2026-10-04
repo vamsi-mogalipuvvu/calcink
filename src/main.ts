@@ -22,12 +22,14 @@ import '@fontsource/caveat/600.css';
 import './style.css';
 import { InkCanvas } from './canvas/inkCanvas.js';
 import type { ToolMode } from './canvas/inkCanvas.js';
-import { AnswerOverlay } from './canvas/answerOverlay.js';
+import { AnswerOverlay, confidenceLevel } from './canvas/answerOverlay.js';
+import type { ConfidenceMark } from './canvas/answerOverlay.js';
 import { getRecognitionBridge } from './recognition/index.js';
 import type { DebugGroup } from './recognition/index.js';
-import { groupStrokes, splitIntoLines, bboxHeight } from './recognition/grouper.js';
+import { groupStrokes, splitIntoLines, bboxHeight, bboxWidth } from './recognition/grouper.js';
 import { evaluate, formatResult } from './math/evaluator.js';
 import type { Stroke } from './canvas/stroke.js';
+import { buzz, chime, haptic, isFeedbackEnabled, setFeedbackEnabled, swish } from './ui/feedback.js';
 
 // ── Grab DOM elements ─────────────────────────────────────────
 
@@ -50,6 +52,8 @@ const btnRedo           = getEl<HTMLButtonElement>('btn-redo');
 const btnPen            = getEl<HTMLButtonElement>('btn-pen');
 const btnStrokeEraser   = getEl<HTMLButtonElement>('btn-stroke-eraser');
 const btnPixelEraser    = getEl<HTMLButtonElement>('btn-pixel-eraser');
+const btnSound          = getEl<HTMLButtonElement>('btn-sound');
+const btnConfidence     = getEl<HTMLButtonElement>('btn-confidence');
 const btnClear          = getEl<HTMLButtonElement>('btn-clear');
 const strokeWidthInput  = getEl<HTMLInputElement>('stroke-width');
 const strokeWidthVal    = getEl<HTMLSpanElement>('stroke-width-val');
@@ -57,6 +61,11 @@ const strokeWidthVal    = getEl<HTMLSpanElement>('stroke-width-val');
 const statusTool        = getEl<HTMLSpanElement>('status-tool');
 const statusStrokes     = getEl<HTMLSpanElement>('status-strokes');
 const statusHint        = getEl<HTMLSpanElement>('status-hint');
+
+let confidenceEnabled = true;
+let pointerActive = false;
+let lastAnswerSignature = '';
+let lastRecognition: { expression: string; debug: DebugGroup[]; strokes: Stroke[] } | null = null;
 
 // ── Initialise subsystems ─────────────────────────────────────
 
@@ -71,6 +80,10 @@ const inkCanvas = new InkCanvas({
   },
   onToolChange: (tool) => {
     statusTool.textContent = `Tool: ${toolLabel(tool)}`;
+  },
+  onScratchErase: () => {
+    swish();
+    haptic(20);
   },
 });
 
@@ -128,6 +141,7 @@ function scheduleRecognition(strokes: Stroke[]): void {
     try {
       const penWidth = parseFloat(strokeWidthInput.value);
       const result   = await bridge.recognize(strokes, penWidth);
+      lastRecognition = { expression: result.expression, debug: result.debug, strokes };
       updateDebugPanel(result.expression, result.debug);
       processExpression(result.expression, result.debug, strokes);
       setStatus('', false);
@@ -170,18 +184,25 @@ function processExpression(
   debug: DebugGroup[],
   strokes: Stroke[],
 ): void {
-  if (!expression || debug.length === 0) { answerOverlay.clear(); return; }
+  if (!expression || debug.length === 0) {
+    answerOverlay.clear();
+    lastAnswerSignature = '';
+    return;
+  }
 
   // Re-group on the main thread to get bounding boxes for drawing positions.
   // groupStrokes is deterministic & sorts by cx, so groups[i] ↔ debug[i].
   const allGroups = groupStrokes(strokes);
   if (allGroups.length !== debug.length) {
     // Grouping mismatch (can happen mid-draw) – skip this frame.
-    answerOverlay.clear(); return;
+    answerOverlay.clear();
+    lastAnswerSignature = '';
+    return;
   }
 
   const lines = splitIntoLines(allGroups);
   const answers: import('./canvas/answerOverlay.js').AnswerEntry[] = [];
+  const marks: ConfidenceMark[] = [];
 
   for (const lineGroups of lines) {
     // Build this line's symbol sequence using debug[] for symbols,
@@ -191,6 +212,7 @@ function processExpression(
 
     let equalsGroup: typeof allGroups[0] | null = null;
     const lineSymbols: string[] = [];
+    const lineItems: Array<{ group: typeof allGroups[0]; symbol: string; debug: DebugGroup }> = [];
 
     for (const lineGroup of lineGroupsSorted) {
       // Find this group's global index (= debug array index)
@@ -199,6 +221,7 @@ function processExpression(
       if (dbg?.dropped) continue; // stray dot filtered by the worker
       const sym  = dbg ? dbg.symbol : '?';
       lineSymbols.push(sym);
+      if (dbg) lineItems.push({ group: lineGroup, symbol: sym, debug: dbg });
       if (sym === '=') equalsGroup = lineGroup;
     }
 
@@ -219,9 +242,43 @@ function processExpression(
     );
 
     answers.push({ x: pos.x, y: pos.y, text: answerText, symbolHeight: medianH });
+
+    if (confidenceEnabled) {
+      for (const item of lineItems) {
+        const bb = item.group.bbox;
+        marks.push({
+          x: (bb.minX + bb.maxX) / 2,
+          y: bb.maxY + 8,
+          w: Math.min(bboxWidth(bb), 40),
+          level: confidenceLevel(item.debug.confidence ?? 0.5),
+        });
+      }
+    }
   }
 
   answerOverlay.setAnswers(answers);
+  answerOverlay.setMarks(confidenceEnabled ? marks : []);
+  maybePlayAnswerFeedback(answers);
+}
+
+function answerSignature(answers: import('./canvas/answerOverlay.js').AnswerEntry[]): string {
+  return answers
+    .map(a => `${a.text}|${Math.round(a.x / 10)}|${Math.round(a.y / 10)}`)
+    .join(';');
+}
+
+function maybePlayAnswerFeedback(answers: import('./canvas/answerOverlay.js').AnswerEntry[]): void {
+  const sig = answerSignature(answers);
+  if (sig === lastAnswerSignature) return;
+  lastAnswerSignature = sig;
+  if (answers.length === 0 || pointerActive) return;
+  if (answers.some(a => a.text === 'Undefined')) {
+    buzz();
+    haptic(30);
+  } else {
+    chime();
+    haptic(15);
+  }
 }
 
 // ── Toolbar: tool selection ───────────────────────────────────
@@ -248,6 +305,37 @@ btnPen.addEventListener('click',          () => setActiveTool('pen'));
 btnStrokeEraser.addEventListener('click', () => setActiveTool('stroke-eraser'));
 btnPixelEraser.addEventListener('click',  () => setActiveTool('pixel-eraser'));
 
+function setToggleState(btn: HTMLButtonElement, active: boolean): void {
+  btn.setAttribute('aria-pressed', String(active));
+  btn.classList.toggle('active', active);
+  btn.classList.toggle('toggle-off', !active);
+}
+
+btnSound.classList.add('toggle');
+btnConfidence.classList.add('toggle');
+setToggleState(btnSound, isFeedbackEnabled());
+setToggleState(btnConfidence, confidenceEnabled);
+
+btnSound.addEventListener('click', () => {
+  const next = !isFeedbackEnabled();
+  setFeedbackEnabled(next);
+  setToggleState(btnSound, next);
+});
+
+btnConfidence.addEventListener('click', () => {
+  confidenceEnabled = !confidenceEnabled;
+  setToggleState(btnConfidence, confidenceEnabled);
+  if (!confidenceEnabled) answerOverlay.setMarks([]);
+  else if (lastRecognition) {
+    processExpression(lastRecognition.expression, lastRecognition.debug, lastRecognition.strokes);
+  }
+});
+
+canvasEl.addEventListener('pointerdown', () => { pointerActive = true; });
+canvasEl.addEventListener('pointerup', () => { pointerActive = false; });
+canvasEl.addEventListener('pointercancel', () => { pointerActive = false; });
+canvasEl.addEventListener('pointerleave', () => { pointerActive = false; });
+
 // ── Toolbar: undo / redo / clear ──────────────────────────────
 
 btnUndo.addEventListener('click', () => { inkCanvas.undo(); updateUndoRedoState(); });
@@ -258,6 +346,7 @@ btnClear.addEventListener('click', () => {
     inkCanvas.clear();
     answerOverlay.clear();
     setStatus('', false);
+    lastRecognition = null;
     updateDebugPanel('', []);
     updateUndoRedoState();
   }
