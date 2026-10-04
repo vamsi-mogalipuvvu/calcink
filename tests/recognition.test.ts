@@ -1,19 +1,32 @@
 /**
- * CalcInk – Recognition Pipeline Unit Tests
+ * CalcInk – Recognition Pipeline Unit Tests (v2)
  * tests/recognition.test.ts
  *
  * Tests for:
- *  1. Stroke grouper (groupStrokes, splitIntoLines)
- *  2. Operator geometry classifier (every operator + confusion cases)
- *  3. Tensor preprocessor (output shape, value range, polarity)
+ *  1. Stroke grouper – spatial-primary algorithm (new)
+ *  2. Operator geometry classifier – all 6 operators + confusion cases
+ *  3. Full pipeline stubs
  *
- * All tests use synthetic stroke data — no real handwriting needed.
+ * KEY NEW TESTS (spatial-primary requirements):
+ *  - "=" drawn with a 2-second pause → still 1 group
+ *  - "÷" drawn as bar→dot→dot with 1.5s pauses → still 1 group
+ *  - "+" and "×" with 1s pause between strokes → 1 group
+ *  - "18" (adjacent digits) → 2 separate groups (never merge)
+ *  - "18+4×2÷8=" → 9 groups (full expression)
  */
 
 import { describe, it, expect } from 'vitest';
-import { groupStrokes, splitIntoLines, bboxOfStroke, bboxWidth, bboxHeight, bboxesClose } from '../src/recognition/grouper.js';
+import {
+  groupStrokes,
+  splitIntoLines,
+  bboxOfStroke,
+  bboxWidth,
+  bboxHeight,
+  bboxesClose,
+  horizOverlapRatio,
+} from '../src/recognition/grouper.js';
 import { classifyOperator } from '../src/recognition/operatorClassifier.js';
-import type { SymbolGroup } from '../src/recognition/grouper.js';
+import type { SymbolGroup, BBox } from '../src/recognition/grouper.js';
 import type { Stroke } from '../src/canvas/stroke.js';
 
 // ─────────────────────────────────────────────────────────────
@@ -31,50 +44,42 @@ function makeStroke(points: [number, number][], t0 = 0, width = 3): Stroke {
   };
 }
 
-/** Horizontal line from (x0,y) to (x1,y) */
 function hLine(x0: number, x1: number, y: number, t0 = 0): Stroke {
   const pts: [number, number][] = [];
   for (let x = x0; x <= x1; x += 5) pts.push([x, y]);
   return makeStroke(pts, t0);
 }
 
-/** Vertical line from (x,y0) to (x,y1) */
 function vLine(x: number, y0: number, y1: number, t0 = 0): Stroke {
   const pts: [number, number][] = [];
   for (let y = y0; y <= y1; y += 5) pts.push([x, y]);
   return makeStroke(pts, t0);
 }
 
-/** Diagonal line ↘ */
 function diagDown(x0: number, y0: number, x1: number, y1: number, t0 = 0): Stroke {
   const steps = 10;
   const pts: [number, number][] = [];
-  for (let i = 0; i <= steps; i++) {
+  for (let i = 0; i <= steps; i++)
     pts.push([x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps]);
-  }
   return makeStroke(pts, t0);
 }
 
-/** Diagonal line ↗ (from bottom-left to top-right) */
 function diagUp(x0: number, y0: number, x1: number, y1: number, t0 = 0): Stroke {
-  // x increases, y decreases → goes up-right
+  // x increases, y decreases (bottom-left → top-right)
   const steps = 10;
   const pts: [number, number][] = [];
-  for (let i = 0; i <= steps; i++) {
+  for (let i = 0; i <= steps; i++)
     pts.push([
       x0 + (x1 - x0) * i / steps,
-      y0 - (y0 - y1) * i / steps,  // y0 is bottom, y1 is top (smaller)
+      y0 - (y0 - y1) * i / steps,
     ]);
-  }
   return makeStroke(pts, t0);
 }
 
-/** Tiny dot (4×4) */
 function dot(cx: number, cy: number, t0 = 0): Stroke {
-  return makeStroke([[cx - 2, cy - 2], [cx, cy - 2], [cx + 2, cy], [cx, cy + 2], [cx - 2, cy]], t0);
+  return makeStroke([[cx-2,cy-2],[cx,cy-2],[cx+2,cy],[cx,cy+2],[cx-2,cy]], t0);
 }
 
-/** Build a SymbolGroup from strokes (computes bbox/cx/cy) */
 function makeGroup(strokes: Stroke[]): SymbolGroup {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   let tStart = Infinity, tEnd = -Infinity;
@@ -90,276 +95,218 @@ function makeGroup(strokes: Stroke[]): SymbolGroup {
     if (t1 > tEnd)   tEnd   = t1;
   }
   const bbox = { minX, minY, maxX, maxY };
-  return {
-    strokes,
-    bbox,
-    cx:        (minX + maxX) / 2,
-    cy:        (minY + maxY) / 2,
-    startTime: tStart,
-    endTime:   tEnd,
-  };
+  return { strokes, bbox, cx: (minX+maxX)/2, cy: (minY+maxY)/2, startTime: tStart, endTime: tEnd };
 }
 
-const MEDIAN_H = 40; // typical symbol height used across tests
+const MEDIAN_H = 40;
 
 // ─────────────────────────────────────────────────────────────
-// 1. Stroke Grouper
+// 1.  SPATIAL-PRIMARY GROUPER
 // ─────────────────────────────────────────────────────────────
 
-describe('groupStrokes', () => {
-  it('returns empty array for no strokes', () => {
-    expect(groupStrokes([])).toEqual([]);
-  });
+describe('groupStrokes – spatial-primary (new algorithm)', () => {
 
-  it('groups a single stroke into one group', () => {
-    const groups = groupStrokes([hLine(0, 50, 20)]);
-    expect(groups).toHaveLength(1);
-  });
-
-  it('keeps two spatially close, temporally close strokes together', () => {
-    // Simulate "=" - two horizontal lines close in space and time
-    const s0 = hLine(10, 60, 20, 0);    // written at t=0
-    const s1 = hLine(10, 60, 30, 200);  // 200ms later
-    const groups = groupStrokes([s0, s1]);
+  // ── "=" with a 2-second pause ──────────────────────────────
+  it('"=" drawn with 2 s pause between bars → 1 group', () => {
+    //   bar1: x=[10,70], y=20, t=0
+    //   bar2: x=[10,70], y=32, t=2000  (2 second pause)
+    const bar1 = hLine(10, 70, 20, 0);
+    const bar2 = hLine(10, 70, 32, 2000);  // 2 s later
+    const groups = groupStrokes([bar1, bar2]);
     expect(groups).toHaveLength(1);
     expect(groups[0].strokes).toHaveLength(2);
   });
 
-  it('separates strokes with large time gap into different symbols', () => {
-    const s0 = hLine(10, 50, 20, 0);
-    const s1 = hLine(70, 110, 20, 2000); // 2 s gap → new symbol
-    const groups = groupStrokes([s0, s1]);
+  it('"=" drawn with 3.5 s pause → still 1 group (within 4 s limit)', () => {
+    const bar1 = hLine(10, 70, 20, 0);
+    const bar2 = hLine(10, 70, 32, 3500);
+    const groups = groupStrokes([bar1, bar2]);
+    expect(groups).toHaveLength(1);
+  });
+
+  it('"=" bars more than 4 s apart → 2 groups (time limit exceeded)', () => {
+    const bar1 = hLine(10, 70, 20, 0);
+    const bar2 = hLine(10, 70, 32, 4500);
+    const groups = groupStrokes([bar1, bar2]);
     expect(groups).toHaveLength(2);
   });
 
-  it('separates strokes that are far apart spatially', () => {
-    const s0 = hLine(0,  40,  20, 0);
-    const s1 = hLine(200, 240, 20, 100); // same time but very far right
-    const groups = groupStrokes([s0, s1]);
-    expect(groups).toHaveLength(2);
+  // ── "÷" with 1.5-second pauses ────────────────────────────
+  it('"÷" bar → top dot → bottom dot (1.5 s pauses) → 1 group', () => {
+    const bar    = hLine(10, 70, 40,   0);    // horizontal bar
+    const topDot = dot(40, 18,        1500);  // 1.5 s later
+    const botDot = dot(40, 62,        3000);  // another 1.5 s later
+    const groups = groupStrokes([bar, topDot, botDot]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].strokes).toHaveLength(3);
   });
 
-  it('sorts groups left-to-right', () => {
-    // Three symbols: digit at x=200, digit at x=10, digit at x=100
-    const s0 = makeStroke([[200, 20], [210, 30]], 0);
-    const s1 = makeStroke([[10,  20], [20,  30]], 2000);
-    const s2 = makeStroke([[100, 20], [110, 30]], 4000);
-    const groups = groupStrokes([s0, s1, s2]);
-    expect(groups).toHaveLength(3);
-    expect(groups[0].cx).toBeLessThan(groups[1].cx);
-    expect(groups[1].cx).toBeLessThan(groups[2].cx);
+  it('"÷" top dot merges with bar because it is inside bar x-range', () => {
+    // The dot (x=[38,42]) is entirely within bar x=[10,70]
+    const bar    = hLine(10, 70, 40, 0);
+    const topDot = dot(40, 18, 500);
+    const groups = groupStrokes([bar, topDot]);
+    expect(groups).toHaveLength(1);
   });
 
-  it('groups "+" two-stroke symbol correctly', () => {
-    // Horizontal + vertical drawn within 400ms, overlapping bbox
-    const h = hLine(20, 60, 40,  0);
-    const v = vLine(40, 20, 60, 300);
+  // ── "+" with 1-second pause ────────────────────────────────
+  it('"+" horizontal then vertical (1 s pause) → 1 group', () => {
+    const h = hLine(20, 60, 40,    0);
+    const v = vLine(40, 20, 60, 1000);
     const groups = groupStrokes([h, v]);
     expect(groups).toHaveLength(1);
     expect(groups[0].strokes).toHaveLength(2);
   });
+
+  // ── "×" with 1-second pause ────────────────────────────────
+  it('"×" two crossing diagonals (1 s pause) → 1 group', () => {
+    const d0 = diagDown(20, 20, 60, 60, 0);
+    const d1 = diagUp(20, 60, 60, 20, 1000);
+    const groups = groupStrokes([d0, d1]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].strokes).toHaveLength(2);
+  });
+
+  // ── Adjacent digits must NOT merge ────────────────────────
+  it('"1" and "8" side by side → 2 separate groups (no horizontal overlap)', () => {
+    // "1": narrow, x=[30,38]   "8": wider, x=[50,80]  — no overlap
+    const one = vLine(34, 0, 50,   0);   // x=34, width≈0 → padded to [31,37]
+    const eight = makeStroke([[50,5],[80,5],[80,25],[50,25],[50,45],[80,45],[80,55],[50,55]], 200);
+    const groups = groupStrokes([one, eight]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it('"1" and "8" even written fast (200 ms apart) → still 2 groups', () => {
+    const one   = makeStroke([[30,5],[32,50]], 0);    // x=[30,32]
+    const eight = makeStroke([[55,5],[85,55]], 200);  // x=[55,85], no overlap with [27,35]
+    const groups = groupStrokes([one, eight]);
+    expect(groups).toHaveLength(2);
+  });
+
+  // ── Full expression "18+4×2÷8=" → 9 groups ────────────────
+  it('"18+4×2÷8=" → 9 symbol groups ordered left-to-right', () => {
+    let t = 0;
+    const dt = () => (t += 300);
+
+    // "1": x=[10,16]
+    const s1 = vLine(13, 5, 55, dt());
+    // "8": x=[30,55]
+    const s8a = makeStroke([[30,5],[55,5],[55,30],[30,30],[30,55],[55,55]], dt());
+    // "+": h=[70,110,y=30] + v=[90,y=10..50]
+    const plusH = hLine(70, 110, 30, dt());
+    const plusV = vLine(90, 10, 50, dt());
+    // "4": x=[130,165]
+    const s4 = makeStroke([[130,5],[130,40],[165,40],[150,5],[150,60]], dt());
+    // "×": two diagonals x=[180,220]
+    const timesD0 = diagDown(180, 10, 220, 50, dt());
+    const timesD1 = diagUp(180, 50, 220, 10, dt());
+    // "2": x=[235,270]
+    const s2 = makeStroke([[235,5],[270,5],[270,30],[235,30],[235,55],[270,55]], dt());
+    // "÷": bar=[285..325,y=30] + top dot + bottom dot
+    const divBar = hLine(285, 325, 30, dt());
+    const divTop = dot(305, 10, dt());
+    const divBot = dot(305, 50, dt());
+    // "8" again: x=[340,375]
+    const s8b = makeStroke([[340,5],[375,5],[375,30],[340,30],[340,55],[375,55]], dt());
+    // "=": two bars x=[390,430]
+    const eqBar1 = hLine(390, 430, 25, dt());
+    const eqBar2 = hLine(390, 430, 37, dt());
+
+    const allStrokes = [s1, s8a, plusH, plusV, s4, timesD0, timesD1, s2,
+                        divBar, divTop, divBot, s8b, eqBar1, eqBar2];
+    const groups = groupStrokes(allStrokes);
+
+    expect(groups).toHaveLength(9);
+    // Left-to-right ordering
+    for (let i = 1; i < groups.length; i++) {
+      expect(groups[i].cx).toBeGreaterThan(groups[i-1].cx);
+    }
+    // Multi-stroke groups
+    const multiStroke = groups.filter(g => g.strokes.length > 1);
+    expect(multiStroke.length).toBeGreaterThanOrEqual(4); // +, ×, ÷, =
+  });
+
+  // ── Edge: single stroke → 1 group ─────────────────────────
+  it('single stroke → 1 group', () => {
+    expect(groupStrokes([hLine(0, 50, 20)])).toHaveLength(1);
+  });
+
+  it('empty input → 0 groups', () => {
+    expect(groupStrokes([])).toHaveLength(0);
+  });
+
+  // ── Sorting ────────────────────────────────────────────────
+  it('groups sorted left-to-right', () => {
+    const s0 = makeStroke([[200,20],[210,30]], 0);
+    const s1 = makeStroke([[10,20],[20,30]],  2000);
+    const s2 = makeStroke([[100,20],[110,30]], 4000);
+    const groups = groupStrokes([s0, s1, s2]);
+    expect(groups[0].cx).toBeLessThan(groups[1].cx);
+    expect(groups[1].cx).toBeLessThan(groups[2].cx);
+  });
 });
 
+// ─────────────────────────────────────────────────────────────
+// 2.  horizOverlapRatio helper
+// ─────────────────────────────────────────────────────────────
+
+describe('horizOverlapRatio', () => {
+  const bb = (minX: number, maxX: number): BBox => ({ minX, maxX, minY: 0, maxY: 10 });
+
+  it('identical boxes → 1.0', () => {
+    expect(horizOverlapRatio(bb(0, 60), bb(0, 60))).toBeCloseTo(1.0);
+  });
+
+  it('no overlap → 0', () => {
+    expect(horizOverlapRatio(bb(0, 40), bb(60, 100))).toBe(0);
+  });
+
+  it('narrow entirely inside wide → 1.0 (of narrower)', () => {
+    // narrow=[35,45] inside wide=[10,70]: overlap=10, narrower=10 → 1.0
+    expect(horizOverlapRatio(bb(10, 70), bb(35, 45))).toBeCloseTo(1.0);
+  });
+
+  it('partial overlap → correct ratio', () => {
+    // [0,60] ∩ [40,80] = 20, narrower = min(60,40) = 40 → 0.5
+    expect(horizOverlapRatio(bb(0, 60), bb(40, 80))).toBeCloseTo(0.5);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 3.  splitIntoLines
+// ─────────────────────────────────────────────────────────────
+
 describe('splitIntoLines', () => {
-  it('puts strokes on the same line into one row', () => {
-    const g0 = makeGroup([hLine(0,  30, 20)]);
+  it('same-row groups → 1 line', () => {
+    const g0 = makeGroup([hLine(0, 30, 20)]);
     const g1 = makeGroup([hLine(50, 80, 25)]);
-    const lines = splitIntoLines([g0, g1]);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toHaveLength(2);
+    expect(splitIntoLines([g0, g1])).toHaveLength(1);
   });
 
-  it('separates strokes on different lines', () => {
-    const g0 = makeGroup([hLine(0, 30,  20)]);
-    const g1 = makeGroup([hLine(0, 30, 120)]); // 100px lower
-    const lines = splitIntoLines([g0, g1]);
-    expect(lines).toHaveLength(2);
+  it('well-separated rows → 2 lines', () => {
+    const g0 = makeGroup([hLine(0, 30, 20)]);
+    const g1 = makeGroup([hLine(0, 30, 120)]);
+    expect(splitIntoLines([g0, g1])).toHaveLength(2);
   });
 
-  it('sorts each line left-to-right', () => {
-    const g0 = makeGroup([makeStroke([[100, 20], [120, 20]])]);
-    const g1 = makeGroup([makeStroke([[20, 20],  [40, 20]])]);
+  it('each line sorted left-to-right', () => {
+    const g0 = makeGroup([makeStroke([[100,20],[120,20]])]);
+    const g1 = makeGroup([makeStroke([[20,20],[40,20]])]);
     const lines = splitIntoLines([g0, g1]);
     expect(lines[0][0].cx).toBeLessThan(lines[0][1].cx);
   });
 });
 
 // ─────────────────────────────────────────────────────────────
-// 2. Operator Geometry Classifier
-// ─────────────────────────────────────────────────────────────
-
-describe('classifyOperator – "." decimal point', () => {
-  it('classifies a tiny single stroke as "."', () => {
-    const d = dot(20, 35, 0); // tiny, sits low
-    const g = makeGroup([d]);
-    const r = classifyOperator(g, MEDIAN_H);
-    expect(r).not.toBeNull();
-    expect(r?.symbol).toBe('.');
-  });
-
-  it('does NOT classify a normal-sized stroke as "."', () => {
-    const s = hLine(0, 50, 20);
-    const g = makeGroup([s]);
-    const r = classifyOperator(g, MEDIAN_H);
-    // Could be '−' but NOT '.'
-    expect(r?.symbol).not.toBe('.');
-  });
-});
-
-describe('classifyOperator – "−" minus', () => {
-  it('classifies a wide flat stroke as "−"', () => {
-    const s = hLine(0, 80, 20);  // width 80, height ~0 → very wide
-    const g = makeGroup([s]);
-    const r = classifyOperator(g, MEDIAN_H);
-    expect(r).not.toBeNull();
-    expect(r?.symbol).toBe('−');
-  });
-
-  it('does NOT classify a tall stroke as "−"', () => {
-    const s = vLine(20, 0, 50);  // tall, not wide
-    const g = makeGroup([s]);
-    const r = classifyOperator(g, MEDIAN_H);
-    expect(r?.symbol).not.toBe('−');
-  });
-});
-
-describe('classifyOperator – "=" equals', () => {
-  it('classifies two stacked flat strokes as "="', () => {
-    const s0 = hLine(10, 60, 20, 0);    // top bar
-    const s1 = hLine(10, 60, 32, 200);  // bottom bar, 12px below
-    const g  = makeGroup([s0, s1]);
-    const r  = classifyOperator(g, MEDIAN_H);
-    expect(r).not.toBeNull();
-    expect(r?.symbol).toBe('=');
-  });
-
-  it('rejects two strokes that are too far apart vertically', () => {
-    const s0 = hLine(10, 60, 20, 0);
-    const s1 = hLine(10, 60, 80, 200);  // 60px apart — too far for "="
-    const g  = makeGroup([s0, s1]);
-    const r  = classifyOperator(g, MEDIAN_H);
-    // Should not be "=" (bars too spread)
-    if (r) expect(r.symbol).not.toBe('=');
-  });
-});
-
-describe('classifyOperator – "+" plus', () => {
-  it('classifies flat + steep crossing strokes as "+"', () => {
-    const h = hLine(20, 60, 40,  0);
-    const v = vLine(40, 20, 60, 300);
-    const g = makeGroup([h, v]);
-    const r = classifyOperator(g, MEDIAN_H);
-    expect(r).not.toBeNull();
-    expect(r?.symbol).toBe('+');
-  });
-
-  it('classifies "+" not "×" when one stroke is horizontal', () => {
-    const h = hLine(20, 60, 40, 0);
-    const v = vLine(40, 20, 60, 200);
-    const g = makeGroup([h, v]);
-    const r = classifyOperator(g, MEDIAN_H);
-    expect(r?.symbol).toBe('+');
-    expect(r?.symbol).not.toBe('×');
-  });
-});
-
-describe('classifyOperator – "×" times', () => {
-  it('classifies two crossing diagonal strokes as "×"', () => {
-    // d0: ↘ from (20,20) to (60,60) — positive slope
-    // d1: ↗ from (20,60) to (60,20) — negative slope, they cross at (40,40)
-    const d0 = diagDown(20, 20, 60, 60, 0);
-    const d1 = diagUp(20, 60, 60, 20, 200); // x0=20,y0=60,x1=60,y1=20
-    const g  = makeGroup([d0, d1]);
-    const r  = classifyOperator(g, MEDIAN_H);
-    expect(r).not.toBeNull();
-    expect(r?.symbol).toBe('×');
-  });
-
-  it('distinguishes "×" from "+" (diagonals vs orthogonal)', () => {
-    const d0 = diagDown(20, 20, 60, 60, 0);
-    const d1 = diagUp(20, 60, 60, 20, 200);
-    const g  = makeGroup([d0, d1]);
-    const r  = classifyOperator(g, MEDIAN_H);
-    expect(r?.symbol).not.toBe('+');
-  });
-});
-
-describe('classifyOperator – "÷" division', () => {
-  it('classifies flat stroke + two small dots as "÷"', () => {
-    const bar    = hLine(10, 60, 40, 0);
-    const topDot = dot(35, 20, 200);  // above
-    const botDot = dot(35, 60, 400);  // below
-    const g = makeGroup([bar, topDot, botDot]);
-    const r = classifyOperator(g, MEDIAN_H);
-    expect(r).not.toBeNull();
-    expect(r?.symbol).toBe('÷');
-  });
-});
-
-// ─────────────────────────────────────────────────────────────
-// 3. Confusion cases
-// ─────────────────────────────────────────────────────────────
-
-describe('classifyOperator – confusion cases', () => {
-  it('"1" (tall narrow) should NOT be classified as "−"', () => {
-    // A "1" stroke is tall and narrow, not wide
-    const one = vLine(30, 0, 50, 0);  // height=50, width=0
-    const g   = makeGroup([one]);
-    const r   = classifyOperator(g, MEDIAN_H);
-    // Should NOT be classified as minus (not wide enough)
-    expect(r?.symbol).not.toBe('−');
-  });
-
-  it('"=" should NOT be confused with two separate far-apart minus signs', () => {
-    // Two parallel horizontal strokes but very far apart (60px gap)
-    const s0 = hLine(10, 60, 10, 0);
-    const s1 = hLine(10, 60, 70, 200);
-    const g  = makeGroup([s0, s1]);
-    const r  = classifyOperator(g, MEDIAN_H);
-    // Gap > 80% of total height → should not be "="
-    expect(r?.symbol).not.toBe('=');
-  });
-
-  it('"+" and "×" differ by diagonal test', () => {
-    // "+" has orthogonal strokes
-    const plus_h = hLine(20, 60, 40, 0);
-    const plus_v = vLine(40, 20, 60, 200);
-    const gPlus  = makeGroup([plus_h, plus_v]);
-    const rPlus  = classifyOperator(gPlus, MEDIAN_H);
-    expect(rPlus?.symbol).toBe('+');
-
-    // "×" has diagonal strokes: ↘ and ↗ crossing
-    const times_d0 = diagDown(20, 20, 60, 60, 0);
-    const times_d1 = diagUp(20, 60, 60, 20, 200); // bottom-left to top-right
-    const gTimes   = makeGroup([times_d0, times_d1]);
-    const rTimes   = classifyOperator(gTimes, MEDIAN_H);
-    expect(rTimes?.symbol).toBe('×');
-
-    expect(rPlus?.symbol).not.toBe(rTimes?.symbol);
-  });
-
-  it('small round stroke should be "." not "0" (operator classifier)', () => {
-    // 3×3 square stroke, much smaller than median height (40px)
-    const tiny = makeStroke([[18,38],[20,38],[22,38],[22,40],[20,42],[18,40],[18,38]], 0);
-    const g    = makeGroup([tiny]);
-    const r    = classifyOperator(g, MEDIAN_H);
-    // classifyOperator should tag this as '.' (small enough)
-    expect(r?.symbol).toBe('.');
-  });
-});
-
-// ─────────────────────────────────────────────────────────────
-// 4. BBox helpers
+// 4.  BBox helpers
 // ─────────────────────────────────────────────────────────────
 
 describe('bbox helpers', () => {
   it('bboxOfStroke computes correct bounds', () => {
-    const s = makeStroke([[10, 20], [50, 5], [30, 40]]);
+    const s = makeStroke([[10,20],[50,5],[30,40]]);
     const b = bboxOfStroke(s);
-    expect(b.minX).toBe(10);
-    expect(b.maxX).toBe(50);
-    expect(b.minY).toBe(5);
-    expect(b.maxY).toBe(40);
+    expect(b.minX).toBe(10); expect(b.maxX).toBe(50);
+    expect(b.minY).toBe(5);  expect(b.maxY).toBe(40);
   });
 
   it('bboxWidth / bboxHeight', () => {
@@ -368,34 +315,115 @@ describe('bbox helpers', () => {
     expect(bboxHeight(b)).toBe(30);
   });
 
-  it('bboxesClose: overlapping boxes are close', () => {
-    const a = { minX: 0,  minY: 0,  maxX: 50, maxY: 30 };
-    const b = { minX: 30, minY: 10, maxX: 80, maxY: 40 };
-    expect(bboxesClose(a, b, 0)).toBe(true);
+  it('bboxesClose: overlapping → true at threshold 0', () => {
+    expect(bboxesClose({minX:0,minY:0,maxX:50,maxY:30},{minX:30,minY:10,maxX:80,maxY:40},0)).toBe(true);
   });
 
-  it('bboxesClose: distant boxes are not close at threshold 0', () => {
-    const a = { minX: 0,   minY: 0,  maxX: 40,  maxY: 30 };
-    const b = { minX: 100, minY: 0,  maxX: 140, maxY: 30 };
-    expect(bboxesClose(a, b, 0)).toBe(false);
+  it('bboxesClose: far apart → false at threshold 0', () => {
+    expect(bboxesClose({minX:0,minY:0,maxX:40,maxY:30},{minX:100,minY:0,maxX:140,maxY:30},0)).toBe(false);
   });
 
-  it('bboxesClose: distant boxes ARE close with enough threshold', () => {
-    const a = { minX: 0,   minY: 0,  maxX: 40,  maxY: 30 };
-    const b = { minX: 100, minY: 0,  maxX: 140, maxY: 30 };
-    expect(bboxesClose(a, b, 60)).toBe(true);
+  it('bboxesClose: far apart → true with large threshold', () => {
+    expect(bboxesClose({minX:0,minY:0,maxX:40,maxY:30},{minX:100,minY:0,maxX:140,maxY:30},60)).toBe(true);
   });
 });
 
 // ─────────────────────────────────────────────────────────────
-// 5. Preprocessor (pure math — no DOM/canvas)
+// 5.  Operator classifier – all 6 operators
 // ─────────────────────────────────────────────────────────────
 
-describe('preprocessor – input validation', () => {
-  it('tensor is Float32Array', async () => {
-    // We cannot run OffscreenCanvas in Vitest (Node env)
-    // So we test the pure math helpers via the grouper/classifier instead.
-    // This is a placeholder to confirm the module exports are importable.
+describe('classifyOperator – "." decimal point', () => {
+  it('tiny single stroke → "."', () => {
+    expect(classifyOperator(makeGroup([dot(20, 35)]), MEDIAN_H)?.symbol).toBe('.');
+  });
+  it('normal-sized stroke → NOT "."', () => {
+    expect(classifyOperator(makeGroup([hLine(0, 50, 20)]), MEDIAN_H)?.symbol).not.toBe('.');
+  });
+});
+
+describe('classifyOperator – "−" minus', () => {
+  it('wide flat stroke → "−"', () => {
+    expect(classifyOperator(makeGroup([hLine(0, 80, 20)]), MEDIAN_H)?.symbol).toBe('−');
+  });
+  it('tall stroke → NOT "−"', () => {
+    expect(classifyOperator(makeGroup([vLine(20, 0, 50)]), MEDIAN_H)?.symbol).not.toBe('−');
+  });
+});
+
+describe('classifyOperator – "=" equals', () => {
+  it('two stacked flat strokes → "="', () => {
+    const g = makeGroup([hLine(10,60,20,0), hLine(10,60,32,200)]);
+    expect(classifyOperator(g, MEDIAN_H)?.symbol).toBe('=');
+  });
+  it('two bars too far apart vertically → NOT "="', () => {
+    const g = makeGroup([hLine(10,60,20,0), hLine(10,60,80,200)]);
+    const r = classifyOperator(g, MEDIAN_H);
+    if (r) expect(r.symbol).not.toBe('=');
+  });
+});
+
+describe('classifyOperator – "+" plus', () => {
+  it('horizontal + vertical crossing → "+"', () => {
+    expect(classifyOperator(makeGroup([hLine(20,60,40,0), vLine(40,20,60,300)]), MEDIAN_H)?.symbol).toBe('+');
+  });
+  it('"+" is not "×"', () => {
+    expect(classifyOperator(makeGroup([hLine(20,60,40,0), vLine(40,20,60,300)]), MEDIAN_H)?.symbol).not.toBe('×');
+  });
+});
+
+describe('classifyOperator – "×" times', () => {
+  it('two crossing diagonals → "×"', () => {
+    const g = makeGroup([diagDown(20,20,60,60,0), diagUp(20,60,60,20,200)]);
+    expect(classifyOperator(g, MEDIAN_H)?.symbol).toBe('×');
+  });
+  it('"×" is not "+"', () => {
+    const g = makeGroup([diagDown(20,20,60,60,0), diagUp(20,60,60,20,200)]);
+    expect(classifyOperator(g, MEDIAN_H)?.symbol).not.toBe('+');
+  });
+});
+
+describe('classifyOperator – "÷" division', () => {
+  it('flat bar + two small dots → "÷"', () => {
+    const g = makeGroup([hLine(10,60,40,0), dot(35,20,200), dot(35,60,400)]);
+    expect(classifyOperator(g, MEDIAN_H)?.symbol).toBe('÷');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 6.  Confusion cases
+// ─────────────────────────────────────────────────────────────
+
+describe('classifyOperator – confusion cases', () => {
+  it('"1" (tall narrow) is NOT "−"', () => {
+    expect(classifyOperator(makeGroup([vLine(30,0,50)]), MEDIAN_H)?.symbol).not.toBe('−');
+  });
+
+  it('"=" vs two far-apart minus signs: wide vert gap → NOT "="', () => {
+    const g = makeGroup([hLine(10,60,10,0), hLine(10,60,70,200)]);
+    const r = classifyOperator(g, MEDIAN_H);
+    if (r) expect(r.symbol).not.toBe('=');
+  });
+
+  it('"+" (orthogonal) vs "×" (diagonal) are different', () => {
+    const rPlus  = classifyOperator(makeGroup([hLine(20,60,40,0), vLine(40,20,60,200)]), MEDIAN_H);
+    const rTimes = classifyOperator(makeGroup([diagDown(20,20,60,60,0), diagUp(20,60,60,20,200)]), MEDIAN_H);
+    expect(rPlus?.symbol).toBe('+');
+    expect(rTimes?.symbol).toBe('×');
+    expect(rPlus?.symbol).not.toBe(rTimes?.symbol);
+  });
+
+  it('small round stroke → "." (not "0") in operator classifier', () => {
+    const tiny = makeStroke([[18,38],[20,38],[22,38],[22,40],[20,42],[18,40],[18,38]]);
+    expect(classifyOperator(makeGroup([tiny]), MEDIAN_H)?.symbol).toBe('.');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 7.  Module import smoke test
+// ─────────────────────────────────────────────────────────────
+
+describe('preprocessor module import', () => {
+  it('preprocessSymbol is a function', async () => {
     const { preprocessSymbol } = await import('../src/recognition/preprocessor.js');
     expect(typeof preprocessSymbol).toBe('function');
   });

@@ -1,13 +1,33 @@
 /**
- * CalcInk – Stroke Grouper
+ * CalcInk – Stroke Grouper (v2 – spatial-primary)
  * src/recognition/grouper.ts
  *
- * Groups raw strokes into logical symbols using:
- *  1. Temporal gap: strokes written close together in time belong together
- *  2. Spatial overlap: bounding boxes that overlap or are very close
- *  3. Relative size: a tiny stroke near a larger one may be a diacritic (e.g. ÷ dots)
+ * Groups raw strokes into logical symbols.
  *
- * Returns groups ordered left-to-right by their horizontal centre.
+ * ALGORITHM (spatial-primary, time-secondary)
+ * ───────────────────────────────────────────
+ * When a new stroke arrives, check the last LOOKBACK groups for a merge
+ * candidate using TWO independent gates:
+ *
+ * Gate A – SPATIAL (primary, geometry-driven):
+ *   1. Horizontal overlap ≥ MIN_HORIZ_OVERLAP_RATIO of the NARROWER bbox width.
+ *      This is the critical gate that keeps adjacent digits separate.
+ *      "1" (x=[30,38]) and "8" (x=[50,80]) have zero horizontal overlap → never merge.
+ *      "=" bar 2 (x=[10,70]) vs bar 1 group (x=[10,70]) → 100% overlap → merge.
+ *   2. Vertical gap ≤ MAX_VERT_GAP_RATIO × max(groupWidth, strokeWidth).
+ *      Using WIDTH (not height) as reference because horizontal strokes (−, =)
+ *      have nearly zero height but ample width as a size reference.
+ *   3. Time gap ≤ MAX_TIME_SPATIAL_MS (4 s). Long pauses prevent accidental merges
+ *      when the user starts a new expression in the same horizontal region.
+ *
+ * Gate B – TEMPORAL only (fast adjacent strokes, NO spatial overlap):
+ *   Disabled. We only merge spatially overlapping strokes.
+ *   This guarantees adjacent digits (even written fast) stay separate.
+ *
+ * Merge target: the group among the last LOOKBACK groups with the highest
+ * horizontal overlap ratio (greedy best-fit, not just last-group).
+ * This handles: bar₁ of `÷`, then the dot (merges with bar₁'s group even
+ * if other strokes were started in between).
  */
 
 import type { Stroke, Point } from '../canvas/stroke.js';
@@ -33,22 +53,41 @@ export interface SymbolGroup {
   endTime: number;
 }
 
-// ── Constants ─────────────────────────────────────────────────
+// ── Tuning constants ───────────────────────────────────────────
 
 /**
- * Maximum time gap (ms) between consecutive strokes to still consider them
- * part of the same symbol. Multi-stroke symbols (=, ÷, +) are written within
- * this window.  Increase if users write slowly.
+ * A new stroke must share at least this fraction of the NARROWER bbox's
+ * width as horizontal overlap to be considered for merging.
+ * 0.30 = 30% — wide enough to catch thin strokes (÷ dots, + vertical arm)
+ * yet strict enough to reject adjacent symbols with no x-range overlap.
  */
-const MAX_TIME_GAP_MS = 800;
+const MIN_HORIZ_OVERLAP_RATIO = 0.30;
 
 /**
- * Maximum spatial gap (as a fraction of the symbol's own height/width) before
- * we consider a stroke a new separate symbol.  0.5 = 50% of bbox height.
+ * Max vertical gap between the existing group and the incoming stroke,
+ * expressed as a fraction of max(groupWidth, strokeWidth).
+ * Using width (not height) avoids the degenerate case where a flat
+ * stroke like "−" has near-zero height.
+ *
+ * For "=" bars 10 px apart, bar width = 60 px → threshold = 60 × 0.55 = 33 px → OK.
+ * For "÷" dot 20 px above bar, bar width = 60 → 20 < 33 → OK.
+ * For "1" (height 50 px) and "−" 80 px away vertically → 80 > 33 → REJECT.
  */
-const MAX_SPATIAL_GAP_FRACTION = 0.8;
+const MAX_VERT_GAP_RATIO = 0.55;
 
-// ── BBox helpers ──────────────────────────────────────────────
+/**
+ * Max time (ms) allowed between spatially-overlapping strokes of the same
+ * symbol. 4 s accommodates slow/deliberate stylus writers.
+ */
+const MAX_TIME_SPATIAL_MS = 4000;
+
+/**
+ * How many recently-closed groups to scan for a merge candidate.
+ * 3 covers "bar → stray point → second bar" edge-cases.
+ */
+const LOOKBACK = 3;
+
+// ── BBox helpers ───────────────────────────────────────────────
 
 export function bboxOfStroke(s: Stroke): BBox {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -58,9 +97,9 @@ export function bboxOfStroke(s: Stroke): BBox {
     if (p.x > maxX) maxX = p.x;
     if (p.y > maxY) maxY = p.y;
   }
-  // Single-point stroke: give it a minimal size
-  if (minX === maxX) { minX -= 2; maxX += 2; }
-  if (minY === maxY) { minY -= 2; maxY += 2; }
+  // Single-point stroke: give it a minimal size so overlap math works
+  if (minX === maxX) { minX -= 3; maxX += 3; }
+  if (minY === maxY) { minY -= 3; maxY += 3; }
   return { minX, minY, maxX, maxY };
 }
 
@@ -74,13 +113,14 @@ export function mergeBBox(a: BBox, b: BBox): BBox {
 }
 
 /** Width of a bounding box */
-export function bboxWidth(b: BBox): number { return b.maxX - b.minX; }
+export function bboxWidth(b: BBox): number  { return b.maxX - b.minX; }
 /** Height of a bounding box */
 export function bboxHeight(b: BBox): number { return b.maxY - b.minY; }
 
 /**
  * Returns true if the two boxes overlap OR are within `threshold` pixels
  * of each other horizontally and vertically.
+ * Kept for backward-compat with operatorClassifier & tests.
  */
 export function bboxesClose(a: BBox, b: BBox, threshold: number): boolean {
   const hOverlap = a.minX <= b.maxX + threshold && b.minX <= a.maxX + threshold;
@@ -96,27 +136,64 @@ export function centroid(pts: Point[]): { x: number; y: number } {
   return { x: sx / pts.length, y: sy / pts.length };
 }
 
-// ── Grouper ───────────────────────────────────────────────────
+// ── Merge-eligibility logic ────────────────────────────────────
 
 /**
- * Given all committed strokes, return an ordered list of SymbolGroups.
+ * Horizontal overlap of bbox b into group g, as a fraction of the narrower
+ * width. Returns 0 if there is no overlap at all.
+ */
+export function horizOverlapRatio(gBbox: BBox, sBbox: BBox): number {
+  const overlapStart = Math.max(gBbox.minX, sBbox.minX);
+  const overlapEnd   = Math.min(gBbox.maxX, sBbox.maxX);
+  const overlap      = Math.max(0, overlapEnd - overlapStart);
+  if (overlap === 0) return 0;
+  const narrower = Math.min(bboxWidth(gBbox), bboxWidth(sBbox));
+  return narrower > 0 ? overlap / narrower : 0;
+}
+
+/**
+ * Vertical gap between group bbox and stroke bbox (0 if they overlap).
+ */
+function verticalGap(gBbox: BBox, sBbox: BBox): number {
+  return Math.max(0,
+    Math.max(gBbox.minY, sBbox.minY) - Math.min(gBbox.maxY, sBbox.maxY),
+  );
+}
+
+/**
+ * Decide whether an incoming stroke should merge into an existing group.
  *
- * Algorithm:
- *  - Process strokes in order of start time.
- *  - For each stroke, try to merge it into the most recent open group if:
- *      (a) time gap < MAX_TIME_GAP_MS, AND
- *      (b) spatial proximity < MAX_SPATIAL_GAP_FRACTION * group height
- *  - Otherwise start a new group.
- *  - After all strokes are processed, sort groups left-to-right.
+ * Rule: SPATIAL overlap is required (Gate A). Time is a secondary guard only.
+ */
+function canMerge(group: SymbolGroup, sBbox: BBox, sStart: number): boolean {
+  // Guard: too old
+  if (sStart - group.endTime > MAX_TIME_SPATIAL_MS) return false;
+
+  // Gate A: horizontal overlap
+  const hRatio = horizOverlapRatio(group.bbox, sBbox);
+  if (hRatio < MIN_HORIZ_OVERLAP_RATIO) return false;
+
+  // Gate B: vertical proximity (relative to the wider dimension)
+  const refWidth = Math.max(bboxWidth(group.bbox), bboxWidth(sBbox), 10);
+  const vGap     = verticalGap(group.bbox, sBbox);
+  return vGap <= refWidth * MAX_VERT_GAP_RATIO;
+}
+
+// ── Main grouper ───────────────────────────────────────────────
+
+/**
+ * Given all committed strokes (in any order), return an ordered list of
+ * SymbolGroups sorted left-to-right by horizontal centre.
+ *
+ * Each call fully recomputes grouping from scratch, so it is safe to call
+ * after every new stroke (debounced by the caller).
  */
 export function groupStrokes(strokes: Stroke[]): SymbolGroup[] {
   if (strokes.length === 0) return [];
 
-  // Sort strokes by start time (they should already be ordered, but guard)
+  // Sort by stroke start time
   const sorted = [...strokes].sort((a, b) => {
-    const ta = a.points[0]?.t ?? 0;
-    const tb = b.points[0]?.t ?? 0;
-    return ta - tb;
+    return (a.points[0]?.t ?? 0) - (b.points[0]?.t ?? 0);
   });
 
   const groups: SymbolGroup[] = [];
@@ -124,81 +201,75 @@ export function groupStrokes(strokes: Stroke[]): SymbolGroup[] {
   for (const stroke of sorted) {
     if (stroke.points.length === 0) continue;
 
-    const sBbox = bboxOfStroke(stroke);
+    const sBbox  = bboxOfStroke(stroke);
     const sStart = stroke.points[0].t;
     const sEnd   = stroke.points[stroke.points.length - 1].t;
 
-    // Try merging with the last group
-    const last = groups[groups.length - 1];
-    if (last) {
-      const timeGap  = sStart - last.endTime;
-      const groupH   = Math.max(bboxHeight(last.bbox), 10);
-      const groupW   = Math.max(bboxWidth(last.bbox), 10);
-      const spatialThreshold = Math.max(groupH, groupW) * MAX_SPATIAL_GAP_FRACTION;
+    // Scan the last LOOKBACK groups for the best merge candidate
+    // (highest horizontal overlap ratio that meets all gates).
+    let bestIdx    = -1;
+    let bestRatio  = MIN_HORIZ_OVERLAP_RATIO - 0.0001; // must exceed threshold
 
-      const canMerge =
-        timeGap < MAX_TIME_GAP_MS &&
-        bboxesClose(last.bbox, sBbox, spatialThreshold);
-
-      if (canMerge) {
-        last.strokes.push(stroke);
-        last.bbox    = mergeBBox(last.bbox, sBbox);
-        last.cx      = (last.bbox.minX + last.bbox.maxX) / 2;
-        last.cy      = (last.bbox.minY + last.bbox.maxY) / 2;
-        last.endTime = sEnd;
-        continue;
+    const start = Math.max(0, groups.length - LOOKBACK);
+    for (let gi = groups.length - 1; gi >= start; gi--) {
+      if (!canMerge(groups[gi], sBbox, sStart)) continue;
+      const ratio = horizOverlapRatio(groups[gi].bbox, sBbox);
+      if (ratio > bestRatio) {
+        bestRatio = ratio;
+        bestIdx   = gi;
       }
     }
 
-    // New group
-    groups.push({
-      strokes:   [stroke],
-      bbox:      sBbox,
-      cx:        (sBbox.minX + sBbox.maxX) / 2,
-      cy:        (sBbox.minY + sBbox.maxY) / 2,
-      startTime: sStart,
-      endTime:   sEnd,
-    });
+    if (bestIdx >= 0) {
+      const g      = groups[bestIdx];
+      g.strokes.push(stroke);
+      g.bbox    = mergeBBox(g.bbox, sBbox);
+      g.cx      = (g.bbox.minX + g.bbox.maxX) / 2;
+      g.cy      = (g.bbox.minY + g.bbox.maxY) / 2;
+      g.endTime = Math.max(g.endTime, sEnd);
+    } else {
+      groups.push({
+        strokes:   [stroke],
+        bbox:      sBbox,
+        cx:        (sBbox.minX + sBbox.maxX) / 2,
+        cy:        (sBbox.minY + sBbox.maxY) / 2,
+        startTime: sStart,
+        endTime:   sEnd,
+      });
+    }
   }
 
-  // Sort groups left-to-right by horizontal centre
+  // Sort left-to-right by horizontal centre
   groups.sort((a, b) => a.cx - b.cx);
-
   return groups;
 }
 
+// ── Line splitter ──────────────────────────────────────────────
+
 /**
- * Detect line breaks: groups with a large vertical gap relative to their
- * height are considered to be on a new "line".
- *
- * Returns groups split into rows, each row sorted left-to-right.
+ * Split groups into rows (lines) based on vertical centre distance.
+ * Returns an array of rows, each sorted left-to-right.
  */
 export function splitIntoLines(groups: SymbolGroup[]): SymbolGroup[][] {
   if (groups.length === 0) return [];
 
-  // Sort by vertical centre first for line detection
   const sorted = [...groups].sort((a, b) => a.cy - b.cy);
-
   const lines: SymbolGroup[][] = [[sorted[0]]];
-  const LINE_GAP_THRESHOLD = 0.8; // fraction of avg symbol height
 
   for (let i = 1; i < sorted.length; i++) {
     const g   = sorted[i];
     const cur = lines[lines.length - 1];
     const avgH = cur.reduce((s, x) => s + bboxHeight(x.bbox), 0) / cur.length;
-    const lastCy = cur[cur.length - 1].cy;
-
-    if (Math.abs(g.cy - lastCy) > avgH * (1 + LINE_GAP_THRESHOLD)) {
+    // Use 1.8× avg height as line-break threshold so tall symbols don't
+    // accidentally break into a new line.
+    const lastCy = cur.reduce((s, x) => s + x.cy, 0) / cur.length;
+    if (Math.abs(g.cy - lastCy) > Math.max(avgH * 1.8, 30)) {
       lines.push([g]);
     } else {
       cur.push(g);
     }
   }
 
-  // Sort each line left-to-right
-  for (const line of lines) {
-    line.sort((a, b) => a.cx - b.cx);
-  }
-
+  for (const line of lines) line.sort((a, b) => a.cx - b.cx);
   return lines;
 }

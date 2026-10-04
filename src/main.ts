@@ -24,6 +24,7 @@ import { InkCanvas } from './canvas/inkCanvas.js';
 import type { ToolMode } from './canvas/inkCanvas.js';
 import { AnswerOverlay } from './canvas/answerOverlay.js';
 import { getRecognitionBridge } from './recognition/index.js';
+import type { DebugGroup } from './recognition/index.js';
 import { groupStrokes, splitIntoLines, bboxHeight } from './recognition/grouper.js';
 import { evaluate, formatResult } from './math/evaluator.js';
 import type { Stroke } from './canvas/stroke.js';
@@ -41,6 +42,8 @@ const answerCanvasEl    = getEl<HTMLCanvasElement>('answer-canvas');
 const containerEl       = getEl<HTMLDivElement>('canvas-container');
 const pixelEraserCursor = getEl<HTMLDivElement>('pixel-eraser-cursor');
 const recognitionStatus = getEl<HTMLDivElement>('recognition-status');
+const debugExprEl  = getEl<HTMLSpanElement>('debug-expr');
+const debugGroupsEl = getEl<HTMLSpanElement>('debug-groups');
 
 const btnUndo           = getEl<HTMLButtonElement>('btn-undo');
 const btnRedo           = getEl<HTMLButtonElement>('btn-redo');
@@ -125,7 +128,8 @@ function scheduleRecognition(strokes: Stroke[]): void {
     try {
       const penWidth = parseFloat(strokeWidthInput.value);
       const result   = await bridge.recognize(strokes, penWidth);
-      processExpression(result.expression, strokes);
+      updateDebugPanel(result.expression, result.debug);
+      processExpression(result.expression, result.debug, strokes);
       setStatus('', false);
     } catch (err) {
       // Cancelled — a newer request is in flight; suppress
@@ -137,71 +141,81 @@ function scheduleRecognition(strokes: Stroke[]): void {
   }, DEBOUNCE_MS);
 }
 
+// ── Debug panel ───────────────────────────────────────────────
+
+function updateDebugPanel(expression: string, debug: DebugGroup[]): void {
+  debugExprEl.textContent = expression || '—';
+  if (debug.length === 0) {
+    debugGroupsEl.textContent = '—';
+    return;
+  }
+  debugGroupsEl.textContent = debug
+    .map(d => `${d.symbol}(${d.strokes}s@${d.cx})`)
+    .join('  ');
+}
+
 // ── Expression → answer ───────────────────────────────────────
 
 /**
- * Given a recognised expression string and the original strokes, compute
- * answers for each line that ends with "=" and draw them on the overlay.
+ * Given a recognised expression string + per-group debug info from the worker,
+ * compute answers for each line ending with "=" and draw them on the overlay.
+ *
+ * We re-group strokes on the main thread to get bounding boxes for positioning,
+ * then align them with the worker's symbol array by index (both are sorted
+ * left-to-right by cx, so index i in debug[] → index i in allGroups[]).
  */
-function processExpression(expression: string, strokes: Stroke[]): void {
-  if (!expression) { answerOverlay.clear(); return; }
+function processExpression(
+  expression: string,
+  debug: DebugGroup[],
+  strokes: Stroke[],
+): void {
+  if (!expression || debug.length === 0) { answerOverlay.clear(); return; }
 
-  // Re-group strokes for positional info (worker already did this but we need
-  // bounding boxes in main-thread coordinate space)
+  // Re-group on the main thread to get bounding boxes for drawing positions.
+  // groupStrokes is deterministic & sorts by cx, so groups[i] ↔ debug[i].
   const allGroups = groupStrokes(strokes);
-  const lines     = splitIntoLines(allGroups);
+  if (allGroups.length !== debug.length) {
+    // Grouping mismatch (can happen mid-draw) – skip this frame.
+    answerOverlay.clear(); return;
+  }
 
+  const lines = splitIntoLines(allGroups);
   const answers: import('./canvas/answerOverlay.js').AnswerEntry[] = [];
 
   for (const lineGroups of lines) {
-    // Build expression string for this line by taking its symbols in order
-    // We find which recognised symbols correspond to this line by matching cx
-    const lineSymbols: string[] = [];
+    // Build this line's symbol sequence using debug[] for symbols,
+    // allGroups[] for bounding boxes.
     const lineGroupsSorted = [...lineGroups].sort((a, b) => a.cx - b.cx);
+    const allGroupsSorted  = [...allGroups].sort((a, b) => a.cx - b.cx);
 
-    // Simple mapping: use the expression chars that correspond to this line's
-    // group positions (approximated by grouping the global expression by lines)
-    // For a robust impl we'd store per-group symbols from the worker; here we
-    // re-derive from position:
-    let equalsGroup: typeof lineGroups[0] | null = null;
-    let equalsIdx   = -1;
-    let exprForLine = '';
+    let equalsGroup: typeof allGroups[0] | null = null;
+    const lineSymbols: string[] = [];
 
-    // Map expression chars to groups by order
-    const allGroupsSorted = [...allGroups].sort((a, b) => a.cx - b.cx);
-    for (let i = 0; i < lineGroupsSorted.length; i++) {
-      const globalIdx = allGroupsSorted.findIndex(g => g === lineGroupsSorted[i]);
-      const sym = globalIdx < expression.length ? expression[globalIdx] : '?';
+    for (const lineGroup of lineGroupsSorted) {
+      // Find this group's global index (= debug array index)
+      const gIdx = allGroupsSorted.indexOf(lineGroup);
+      const sym  = gIdx >= 0 && gIdx < debug.length ? debug[gIdx].symbol : '?';
       lineSymbols.push(sym);
-      if (sym === '=') {
-        equalsGroup = lineGroupsSorted[i];
-        equalsIdx   = lineSymbols.length - 1;
-      }
+      if (sym === '=') equalsGroup = lineGroup;
     }
 
+    const equalsIdx = lineSymbols.lastIndexOf('=');
     if (!equalsGroup || equalsIdx <= 0) continue;
 
-    exprForLine = lineSymbols.slice(0, equalsIdx).join('');
-    const evalResult = evaluate(exprForLine);
-    const answerText = evalResult.ok
+    const exprForLine = lineSymbols.slice(0, equalsIdx).join('');
+    const evalResult  = evaluate(exprForLine);
+    const answerText  = evalResult.ok
       ? formatResult(evalResult.value)
       : (evalResult.error === 'Undefined' ? 'Undefined' : '?');
 
-    const medianH = lineGroupsSorted
-      .map(g => bboxHeight(g.bbox))
-      .sort((a, b) => a - b)[Math.floor(lineGroupsSorted.length / 2)] ?? 30;
-
-    const pos = AnswerOverlay.answerPosition(
+    const heights  = lineGroupsSorted.map(g => bboxHeight(g.bbox)).sort((a, b) => a - b);
+    const medianH  = heights[Math.floor(heights.length / 2)] ?? 30;
+    const pos      = AnswerOverlay.answerPosition(
       equalsGroup.bbox,
       parseFloat(strokeWidthInput.value),
     );
 
-    answers.push({
-      x:            pos.x,
-      y:            pos.y,
-      text:         answerText,
-      symbolHeight: medianH,
-    });
+    answers.push({ x: pos.x, y: pos.y, text: answerText, symbolHeight: medianH });
   }
 
   answerOverlay.setAnswers(answers);
@@ -241,6 +255,7 @@ btnClear.addEventListener('click', () => {
     inkCanvas.clear();
     answerOverlay.clear();
     setStatus('', false);
+    updateDebugPanel('', []);
     updateUndoRedoState();
   }
 });

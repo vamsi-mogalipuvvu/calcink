@@ -14,12 +14,19 @@ import type { Stroke } from '../canvas/stroke.js';
 
 // ── Types ─────────────────────────────────────────────────────
 
+export interface DebugGroup {
+  symbol: string;
+  cx: number;
+  strokes: number;
+}
+
 export interface RecognitionResult {
   expression: string;
+  debug: DebugGroup[];
 }
 
 type WorkerMessage =
-  | { type: 'RESULT'; id: number; expression: string }
+  | { type: 'RESULT'; id: number; expression: string; debug: DebugGroup[] }
   | { type: 'ERROR';  id: number; message: string }
   | { type: 'READY' };
 
@@ -94,7 +101,7 @@ export class RecognitionBridge {
     this.pending.delete(msg.id);
 
     if (msg.type === 'RESULT') {
-      handlers.resolve({ expression: msg.expression });
+      handlers.resolve({ expression: msg.expression, debug: msg.debug });
     } else if (msg.type === 'ERROR') {
       handlers.reject(new Error(msg.message));
     }

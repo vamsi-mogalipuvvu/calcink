@@ -412,6 +412,51 @@ input[type='range']#stroke-width:hover::-webkit-slider-thumb {
   animation: fade-in 0.3s ease both;
 }
 
+/* ── Debug Panel ─────────────────────────────────────────────── */
+.debug-panel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 14px;
+  min-height: 26px;
+  background: rgba(17, 17, 27, 0.92);
+  border-top: 1px solid rgba(137, 180, 250, 0.18);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-size: 11.5px;
+  color: #cdd6f4;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.debug-label {
+  color: #6c7086;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.debug-sep {
+  color: #313244;
+  flex-shrink: 0;
+}
+
+.debug-expr {
+  color: #cba6f7;
+  font-weight: 600;
+  letter-spacing: 2px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.debug-groups {
+  color: #89dceb;
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Responsive adjustments ──────────────────────────────────── */
 @media (max-width: 600px) {
   .brand-tagline { display: none; }

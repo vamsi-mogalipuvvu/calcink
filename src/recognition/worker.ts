@@ -156,30 +156,28 @@ async function recognizeStrokes(
   currentJobId = id;
 
   try {
-    // Group strokes into symbols
     const groups = groupStrokes(strokes);
     if (groups.length === 0) {
-      self.postMessage({ type: 'RESULT', id, expression: '', groups: [] });
+      self.postMessage({ type: 'RESULT', id, expression: '', debug: [] });
       return;
     }
 
-    // Compute median symbol height for relative-size tests
     const heights = groups.map(g => bboxHeight(g.bbox)).sort((a, b) => a - b);
     const medianH = heights[Math.floor(heights.length / 2)] ?? 20;
 
-    // Classify each group
     const symbols: string[] = [];
+    const debug: Array<{ symbol: string; cx: number; strokes: number }> = [];
+
     for (const group of groups) {
-      // Check for cancellation
       if (currentJobId !== id) return;
       const sym = await classifyGroup(group, medianH, penWidth);
       symbols.push(sym);
+      debug.push({ symbol: sym, cx: Math.round(group.cx), strokes: group.strokes.length });
     }
 
     if (currentJobId !== id) return;
 
-    const expression = symbols.join('');
-    self.postMessage({ type: 'RESULT', id, expression });
+    self.postMessage({ type: 'RESULT', id, expression: symbols.join(''), debug });
   } catch (err) {
     if (currentJobId === id) {
       self.postMessage({ type: 'ERROR', id, message: String(err) });
