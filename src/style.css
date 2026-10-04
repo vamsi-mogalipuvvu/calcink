@@ -1,0 +1,374 @@
+/* ================================================================
+   CalcInk – Global Styles
+   Design system: notebook-paper aesthetic, dark-accented toolbar
+   ================================================================ */
+
+/* ── CSS Custom Properties ──────────────────────────────────── */
+:root {
+  /* Paper palette */
+  --paper-bg: #fafaf7;
+  --paper-line: #c8d8e8;
+  --paper-margin: #e8a0a0;
+  --paper-shadow: rgba(0, 0, 0, 0.08);
+
+  /* Brand / accent */
+  --accent-primary: #4f46e5;       /* indigo */
+  --accent-primary-hover: #4338ca;
+  --accent-primary-light: #e0e7ff;
+  --accent-danger: #dc2626;
+  --accent-danger-hover: #b91c1c;
+  --accent-danger-light: #fee2e2;
+
+  /* Toolbar */
+  --toolbar-bg: #1e1e2e;
+  --toolbar-border: #2d2d44;
+  --toolbar-text: #cdd6f4;
+  --toolbar-btn-hover: #313244;
+  --toolbar-btn-active: #45475a;
+  --toolbar-divider: #45475a;
+
+  /* UI neutral */
+  --text-primary: #1e1e2e;
+  --text-secondary: #6c7086;
+  --surface: #ffffff;
+  --border: #e2e8f0;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+
+  /* Ink */
+  --ink-color: #1e1e2e;
+
+  /* Transitions */
+  --transition-fast: 120ms ease;
+  --transition-mid: 200ms ease;
+
+  /* Sizing */
+  --toolbar-height: 56px;
+  --header-height: 70px;
+  --status-height: 32px;
+}
+
+/* ── Reset & Base ───────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;           /* canvas fills viewport */
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--paper-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── App Shell ──────────────────────────────────────────────── */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* ── Header ─────────────────────────────────────────────────── */
+.app-header {
+  height: var(--header-height);
+  background: var(--toolbar-bg);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--toolbar-border);
+  flex-shrink: 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.brand-name {
+  font-size: 22px;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: -0.3px;
+}
+
+.brand-tagline {
+  font-size: 13px;
+  color: #6c7086;
+  font-style: italic;
+  border-left: 1px solid var(--toolbar-divider);
+  padding-left: 16px;
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────── */
+.toolbar {
+  height: var(--toolbar-height);
+  background: var(--toolbar-bg);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 14px;
+  border-bottom: 2px solid var(--accent-primary);
+  flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 28px;
+  background: var(--toolbar-divider);
+  margin: 0 8px;
+  flex-shrink: 0;
+}
+
+/* ── Tool Buttons ────────────────────────────────────────────── */
+.tool-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--toolbar-text);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  transition: background var(--transition-fast), color var(--transition-fast),
+              transform var(--transition-fast), box-shadow var(--transition-fast);
+  user-select: none;
+  white-space: nowrap;
+  min-width: 52px;
+}
+
+.tool-btn svg {
+  flex-shrink: 0;
+  transition: transform var(--transition-fast);
+}
+
+.tool-btn:hover {
+  background: var(--toolbar-btn-hover);
+  color: #ffffff;
+}
+
+.tool-btn:hover svg {
+  transform: scale(1.1);
+}
+
+.tool-btn:active {
+  transform: scale(0.95);
+  background: var(--toolbar-btn-active);
+}
+
+/* Active / pressed tool */
+.tool-btn.active,
+.tool-btn[aria-pressed="true"] {
+  background: var(--accent-primary);
+  color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.4);
+}
+
+/* Danger variant (Clear) */
+.tool-btn.danger {
+  color: #f38ba8;
+}
+
+.tool-btn.danger:hover {
+  background: var(--accent-danger-light);
+  color: var(--accent-danger);
+}
+
+.tool-btn.danger:active {
+  background: #fca5a5;
+}
+
+/* Disabled state */
+.tool-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ── Width Slider ────────────────────────────────────────────── */
+.width-group {
+  gap: 8px;
+}
+
+.slider-label {
+  font-size: 11px;
+  color: #6c7086;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+input[type='range']#stroke-width {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 90px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--toolbar-divider);
+  outline: none;
+  cursor: pointer;
+  accent-color: var(--accent-primary);
+}
+
+input[type='range']#stroke-width::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.3);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+input[type='range']#stroke-width:hover::-webkit-slider-thumb {
+  transform: scale(1.2);
+  box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.4);
+}
+
+.slider-val {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-primary);
+  min-width: 20px;
+  text-align: right;
+}
+
+/* ── Canvas Container ────────────────────────────────────────── */
+.canvas-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--paper-bg);
+
+  /* Notebook lines via CSS gradient */
+  background-image:
+    /* Red margin line at ~60px from left */
+    linear-gradient(to right, transparent 59px, var(--paper-margin) 59px, var(--paper-margin) 60px, transparent 60px),
+    /* Horizontal ruled lines every 32px */
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 31px,
+      var(--paper-line) 31px,
+      var(--paper-line) 32px
+    );
+
+  /* Subtle paper texture shadow at left */
+  box-shadow: inset 4px 0 12px rgba(0, 0, 0, 0.04);
+}
+
+/* The actual drawing canvas – fills the container */
+#main-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* Disable all browser touch/pan handling so pointer events fire cleanly */
+  touch-action: none;
+  cursor: crosshair;
+  /* Canvas is transparent so notebook background shows through */
+}
+
+/* Active eraser cursors */
+.canvas-container.tool-stroke-eraser #main-canvas {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Crect x='1' y='1' width='22' height='22' rx='3' fill='%23fee2e2' stroke='%23dc2626' stroke-width='2'/%3E%3C/svg%3E") 12 12, cell;
+}
+
+.canvas-container.tool-pixel-eraser #main-canvas {
+  cursor: none;   /* we draw our own circle cursor */
+}
+
+/* ── Pixel Eraser Cursor ─────────────────────────────────────── */
+.pixel-eraser-cursor {
+  position: absolute;
+  border: 2px solid var(--accent-danger);
+  border-radius: 50%;
+  pointer-events: none;
+  display: none;
+  transform: translate(-50%, -50%);
+  background: rgba(220, 38, 38, 0.08);
+  transition: width var(--transition-fast), height var(--transition-fast);
+}
+
+.canvas-container.tool-pixel-eraser .pixel-eraser-cursor {
+  display: block;
+}
+
+/* ── Status Bar ──────────────────────────────────────────────── */
+.status-bar {
+  height: var(--status-height);
+  background: var(--toolbar-bg);
+  border-top: 1px solid var(--toolbar-border);
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 16px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #6c7086;
+  letter-spacing: 0.2px;
+}
+
+.status-bar span {
+  white-space: nowrap;
+}
+
+#status-hint {
+  margin-left: auto;
+  color: #89b4fa;
+  font-style: italic;
+}
+
+/* ── Micro-animations ────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.tool-btn {
+  animation: fade-in 0.3s ease both;
+}
+
+/* ── Responsive adjustments ──────────────────────────────────── */
+@media (max-width: 600px) {
+  .brand-tagline { display: none; }
+  .tool-btn span { display: none; }
+  .tool-btn { min-width: 36px; padding: 6px 8px; }
+  .width-group .slider-label { display: none; }
+}
