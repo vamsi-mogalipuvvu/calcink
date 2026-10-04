@@ -26,8 +26,7 @@ import { preprocessSymbol } from './preprocessor.js';
 import { strayDotMask } from './postprocess.js';
 
 // ── ORT WASM path config ─────────────────────────────────────────────────────
-// We use the /ort-wasm/ path in public/ (bundled locally, no network needed).
-// Setting wasmPaths as an absolute URL makes it worker-context-safe.
+// ORT's WASM is bundled inline by Vite via the 'onnxruntime-web/all' entry; no network or public/ort-wasm needed.
 ort.env.wasm.numThreads = 1;   // single-thread: no SharedArrayBuffer/COEP needed
 ort.env.wasm.proxy     = false; // already in a worker, no proxy needed
 
@@ -180,7 +179,7 @@ async function recognizeStrokes(
 
     const keep = strayDotMask(symbols);
     const finalSymbols = symbols.filter((_, i) => keep[i]);
-    const finalDebug   = debug.filter((_, i) => keep[i]);
+    const finalDebug   = debug.map((d, i) => ({ ...d, dropped: !keep[i] }));
     self.postMessage({ type: 'RESULT', id, expression: finalSymbols.join(''), debug: finalDebug });
   } catch (err) {
     if (currentJobId === id) {

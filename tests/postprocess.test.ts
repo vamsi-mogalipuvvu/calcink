@@ -41,4 +41,11 @@ describe('strayDotMask', () => {
     const mask = strayDotMask(['5', '+', '3', '.']);
     expect(mask).toEqual([true, true, true, false]);
   });
+
+  it('dropped dot debug keeps every symbol and marks only the dropped index', () => {
+    const symbols = ['.', '1', '8', '+', '4'];
+    const debug = symbols.map((s, i) => ({ symbol: s, dropped: !strayDotMask(symbols)[i] }));
+    expect(debug).toHaveLength(5);
+    expect(debug.map(d => d.dropped)).toEqual([true, false, false, false, false]);
+  });
 });

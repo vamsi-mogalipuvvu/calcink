@@ -144,12 +144,13 @@ function scheduleRecognition(strokes: Stroke[]): void {
 // ── Debug panel ───────────────────────────────────────────────
 
 function updateDebugPanel(expression: string, debug: DebugGroup[]): void {
+  const shown = debug.filter(d => !d.dropped);
   debugExprEl.textContent = expression || '—';
-  if (debug.length === 0) {
+  if (shown.length === 0) {
     debugGroupsEl.textContent = '—';
     return;
   }
-  debugGroupsEl.textContent = debug
+  debugGroupsEl.textContent = shown
     .map(d => `${d.symbol}(${d.strokes}s@${d.cx})`)
     .join('  ');
 }
@@ -194,7 +195,9 @@ function processExpression(
     for (const lineGroup of lineGroupsSorted) {
       // Find this group's global index (= debug array index)
       const gIdx = allGroupsSorted.indexOf(lineGroup);
-      const sym  = gIdx >= 0 && gIdx < debug.length ? debug[gIdx].symbol : '?';
+      const dbg  = gIdx >= 0 && gIdx < debug.length ? debug[gIdx] : undefined;
+      if (dbg?.dropped) continue; // stray dot filtered by the worker
+      const sym  = dbg ? dbg.symbol : '?';
       lineSymbols.push(sym);
       if (sym === '=') equalsGroup = lineGroup;
     }

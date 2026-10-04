@@ -338,21 +338,29 @@ export class InkCanvas {
 
   // ── Pixel eraser ──────────────────────────────────────────────
 
-  /**
-   * Erase a circular area by re-rendering strokes and cutting out the circle.
-   * We use a temporary offscreen approach: erase within the live canvas context.
-   */
   private _pixelEraseAt(pt: Point): void {
-    // We clip strokes to a circle via globalCompositeOperation = 'destination-out'
-    // This is the most efficient approach without an offscreen canvas.
-    const r = this.pixelEraserRadius;
-    this.ctx.save();
-    this.ctx.globalCompositeOperation = 'destination-out';
-    this.ctx.beginPath();
-    this.ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
-    this.ctx.fillStyle = 'rgba(0,0,0,1)';
-    this.ctx.fill();
-    this.ctx.restore();
+    const r2 = this.pixelEraserRadius * this.pixelEraserRadius;
+    let changed = false;
+    const next: Stroke[] = [];
+    for (const stroke of this.strokes) {
+      const pts = stroke.points;
+      if (!pts.some(p => this._dist2(p, pt) <= r2)) { next.push(stroke); continue; }
+      changed = true;
+      let run: Point[] = [];
+      const flush = (): void => {
+        if (run.length >= 2) next.push({ ...createStroke(stroke.width, stroke.color), points: run });
+        run = [];
+      };
+      for (const p of pts) {
+        if (this._dist2(p, pt) <= r2) flush(); else run.push(p);
+      }
+      flush();
+    }
+    if (changed) {
+      this.strokes = next;
+      this._scheduleRedraw();
+      this.onStrokesChange?.(this.strokes);
+    }
   }
 
   // ── Drawing ───────────────────────────────────────────────────
