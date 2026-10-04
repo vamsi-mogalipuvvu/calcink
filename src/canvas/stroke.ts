@@ -41,6 +41,26 @@ export function createStroke(width: number, color: string): Stroke {
   };
 }
 
+export function densify(pts: Point[], step: number): Point[] {
+  if (pts.length < 2) return pts;
+  const out: Point[] = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const n = Math.floor(Math.hypot(b.x - a.x, b.y - a.y) / step);
+    for (let k = 1; k <= n; k++) {
+      const f = k / (n + 1);
+      out.push({
+        x: a.x + (b.x - a.x) * f,
+        y: a.y + (b.y - a.y) * f,
+        t: a.t + (b.t - a.t) * f,
+        pressure: a.pressure,
+      });
+    }
+    out.push(b);
+  }
+  return out;
+}
+
 /** Reset the id counter (used in tests only) */
 export function _resetIdCounter(): void {
   _nextId = 1;

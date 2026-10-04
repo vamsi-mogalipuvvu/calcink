@@ -7,7 +7,7 @@
  *  - Pointer Events (mouse / stylus / touch) → stroke capture
  *  - Smooth stroke rendering using quadratic Bézier midpoint smoothing
  *  - Stroke eraser (removes the whole stroke under the pointer)
- *  - Pixel eraser (composites with destination-out to erase pixels)
+ *  - Pixel eraser (edits stroke data to remove erased segments)
  *  - Full redraw from stroke data on every change
  *
  * Performance notes:
@@ -20,7 +20,7 @@
  */
 
 import type { Stroke, Point } from './stroke.js';
-import { createStroke } from './stroke.js';
+import { createStroke, densify } from './stroke.js';
 import { DrawHistory } from './history.js';
 
 // ── Tool modes ────────────────────────────────────────────────
@@ -72,6 +72,7 @@ export class InkCanvas {
 
   /** Pixel eraser radius in CSS pixels */
   private pixelEraserRadius = 20;
+  private lastEraserPt: Point | null = null;
 
   /** Callbacks */
   private onStrokesChange?: (strokes: Stroke[]) => void;
@@ -231,6 +232,7 @@ export class InkCanvas {
       this._eraseStrokeAt(pt);
     } else if (this._tool === 'pixel-eraser') {
       this.history.push(this.strokes);
+      this.lastEraserPt = null;
       this._pixelEraseAt(pt);
     }
   };
@@ -264,6 +266,8 @@ export class InkCanvas {
   };
 
   private _onPointerUp = (e: PointerEvent): void => {
+    this.lastEraserPt = null;
+    if (this.activeStroke?.id === '__eraser__') this.activeStroke = null;
     if (this._tool === 'pen' && this.activeStroke) {
       // Finalise the stroke
       if (this.activeStroke.points.length >= 1) {
@@ -339,20 +343,24 @@ export class InkCanvas {
   // ── Pixel eraser ──────────────────────────────────────────────
 
   private _pixelEraseAt(pt: Point): void {
+    const from = this.lastEraserPt ?? pt;
+    this.lastEraserPt = pt;
     const r2 = this.pixelEraserRadius * this.pixelEraserRadius;
+    const hit = (p: Point): boolean => this._distToSegment2(p, from, pt) <= r2;
     let changed = false;
     const next: Stroke[] = [];
     for (const stroke of this.strokes) {
-      const pts = stroke.points;
-      if (!pts.some(p => this._dist2(p, pt) <= r2)) { next.push(stroke); continue; }
+      const dense = densify(stroke.points, 3);
+      if (!dense.some(hit)) { next.push(stroke); continue; }
       changed = true;
       let run: Point[] = [];
       const flush = (): void => {
-        if (run.length >= 2) next.push({ ...createStroke(stroke.width, stroke.color), points: run });
+        // drop tiny leftovers (< ~9px) so erasing never creates stray dots
+        if (run.length >= 4) next.push({ ...createStroke(stroke.width, stroke.color), points: run });
         run = [];
       };
-      for (const p of pts) {
-        if (this._dist2(p, pt) <= r2) flush(); else run.push(p);
+      for (const p of dense) {
+        if (hit(p)) flush(); else run.push(p);
       }
       flush();
     }
