@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  // Serve from project root; index.html lives at root
   root: '.',
   base: './',
   build: {
@@ -11,5 +10,22 @@ export default defineConfig({
   server: {
     port: 5173,
     open: true,
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
+  },
+  optimizeDeps: {
+    exclude: ['onnxruntime-web'],
+  },
+  worker: {
+    format: 'es',
+  },
+  test: {
+    environment: 'node',
+    globals: false,
+    // Polyfill OffscreenCanvas for preprocessor tests
+    setupFiles: ['./tests/setup.ts'],
   },
 });
+

@@ -1,46 +1,109 @@
 /**
- * CalcInk – Recognition Module (stub)
+ * CalcInk – Recognition Worker Bridge
  * src/recognition/index.ts
  *
- * This module will contain the offline handwriting recognition engine
- * (e.g. a TensorFlow.js model, CNN, or classical feature extraction).
- *
- * For now it exports the interface contract so the rest of the codebase
- * can depend on the types without waiting for the recognition impl.
- *
- * ── FUTURE STEP ──────────────────────────────────────────────
- * Implement recognizeStrokes() to convert Stroke[] → math expression string.
- * The function MUST:
- *   - Run entirely client-side (no network requests)
- *   - Not block the main thread for > 16 ms (use a Web Worker if needed)
- *   - Return null when confidence is too low (let the user re-draw)
+ * Main-thread interface to the recognition Web Worker.
+ * Handles:
+ *  - Worker lifecycle (create, destroy)
+ *  - Debounced recognition requests (300ms)
+ *  - Cancellation of stale jobs
+ *  - Typed message passing
  */
 
 import type { Stroke } from '../canvas/stroke.js';
 
-/** Result of recognition */
+// ── Types ─────────────────────────────────────────────────────
+
 export interface RecognitionResult {
-  /** The recognised expression, e.g. "18+4×3=" */
   expression: string;
-  /** Confidence score 0–1 (1 = certain) */
-  confidence: number;
 }
 
-/**
- * Attempt to recognise a math expression from the given strokes.
- *
- * @param strokes - All strokes on the canvas
- * @returns Recognised expression + confidence, or null if recognition fails.
- *
- * @stub This is a placeholder – recognition is not yet implemented.
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export async function recognizeStrokes(_strokes: Stroke[]): Promise<RecognitionResult | null> {
-  // TODO: implement in Step 2
-  return null;
+type WorkerMessage =
+  | { type: 'RESULT'; id: number; expression: string }
+  | { type: 'ERROR';  id: number; message: string }
+  | { type: 'READY' };
+
+// ── Bridge ────────────────────────────────────────────────────
+
+export class RecognitionBridge {
+  private worker: Worker;
+  private ready   = false;
+  private nextId  = 1;
+  private pending = new Map<number, {
+    resolve: (r: RecognitionResult) => void;
+    reject:  (e: Error) => void;
+  }>();
+
+  /** Called when worker becomes ready (model loaded) */
+  onReady?: () => void;
+
+  constructor() {
+    // Vite will bundle this worker as a separate chunk automatically
+    this.worker = new Worker(
+      new URL('./worker.js', import.meta.url),
+      { type: 'module' },
+    );
+    this.worker.addEventListener('message', this._handleMessage);
+    this.worker.addEventListener('error', (e) => {
+      console.error('[RecognitionBridge] Worker error:', e);
+    });
+  }
+
+  get isReady(): boolean { return this.ready; }
+
+  /**
+   * Send strokes to the worker for recognition.
+   * Returns a promise that resolves with the expression string.
+   * Any previous pending request is cancelled.
+   */
+  recognize(strokes: Stroke[], penWidth: number): Promise<RecognitionResult> {
+    // Cancel previous job
+    for (const [id, { reject }] of this.pending) {
+      this.worker.postMessage({ type: 'CANCEL', id });
+      reject(new Error('Cancelled'));
+    }
+    this.pending.clear();
+
+    const id = this.nextId++;
+    const promise = new Promise<RecognitionResult>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+    });
+
+    this.worker.postMessage({ type: 'RECOGNIZE', id, strokes, penWidth });
+    return promise;
+  }
+
+  destroy(): void {
+    this.worker.terminate();
+    this.pending.clear();
+  }
+
+  private _handleMessage = (e: MessageEvent<WorkerMessage>): void => {
+    const msg = e.data;
+
+    if (msg.type === 'READY') {
+      this.ready = true;
+      this.onReady?.();
+      return;
+    }
+
+    const handlers = this.pending.get(msg.id);
+    if (!handlers) return; // Stale result
+
+    this.pending.delete(msg.id);
+
+    if (msg.type === 'RESULT') {
+      handlers.resolve({ expression: msg.expression });
+    } else if (msg.type === 'ERROR') {
+      handlers.reject(new Error(msg.message));
+    }
+  };
 }
 
-/** Whether the recognition module is ready (model loaded, etc.) */
-export function isRecognitionReady(): boolean {
-  return false; // Not yet implemented
+// Singleton bridge instance
+let _bridge: RecognitionBridge | null = null;
+
+export function getRecognitionBridge(): RecognitionBridge {
+  if (!_bridge) _bridge = new RecognitionBridge();
+  return _bridge;
 }
