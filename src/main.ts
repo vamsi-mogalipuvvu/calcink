@@ -109,6 +109,8 @@ bridge.onReady = () => {
   statusHint.textContent = '✨ Write a math expression ending with = and CalcInk will answer! Tip: scribble over ink to erase it.';
   setStatus('Model ready', false);
   setTimeout(() => setStatus('', false), 2000);
+  const strokes = inkCanvas.getStrokes();
+  if (strokes.length > 0) scheduleRecognition(strokes);
 };
 
 function setStatus(text: string, thinking: boolean): void {
