@@ -129,6 +129,18 @@ function relHeight(stroke: Stroke, g: SymbolGroup): number {
   return sh / gh;
 }
 
+/**
+ * True if a stroke is flat: wide and short, or close to horizontal.
+ * Tolerant of wavy or slightly slanted handwriting.
+ */
+function looksFlat(s: Stroke): boolean {
+  const xs = s.points.map(p => p.x);
+  const ys = s.points.map(p => p.y);
+  const w = Math.max(...xs) - Math.min(...xs);
+  const h = Math.max(...ys) - Math.min(...ys);
+  return (w > 8 && h < w * 0.35) || isFlat(s.points);
+}
+
 // ── Main classifier ───────────────────────────────────────────
 
 /**
@@ -173,20 +185,16 @@ export function classifyOperator(
   // ── "=" — equals: two stacked flat strokes ─────────────────
   if (n === 2) {
     const [s0, s1] = g.strokes;
-    if (isFlat(s0.points) && isFlat(s1.points)) {
-      // The two strokes must be roughly the same width and vertically separated
+    if (looksFlat(s0) && looksFlat(s1)) {
       const cy0 = s0.points.reduce((s, p) => s + p.y, 0) / s0.points.length;
       const cy1 = s1.points.reduce((s, p) => s + p.y, 0) / s1.points.length;
       const vertSep = Math.abs(cy0 - cy1);
-      // Vertical separation should be 20%–80% of group height (not too close, not too far)
-      const sepFrac = gh > 0 ? vertSep / gh : 0;
-      if (sepFrac > 0.15 && sepFrac < 0.85) {
-        // Also require horizontal overlap (both strokes span the same X range)
-        const w0 = relWidth(s0, g);
-        const w1 = relWidth(s1, g);
-        if (w0 > 0.4 && w1 > 0.4) {
-          return { symbol: '=', confidence: 0.93, reason: 'equals: two flat strokes stacked' };
-        }
+      const w0 = relWidth(s0, g);
+      const w1 = relWidth(s1, g);
+      // Bars must be separated (not the same line), not absurdly far apart,
+      // and both must span most of the group's width.
+      if (vertSep > gw * 0.05 && vertSep < gw * 2.0 && w0 > 0.4 && w1 > 0.4) {
+        return { symbol: '=', confidence: 0.93, reason: 'equals: two flat strokes stacked' };
       }
     }
   }

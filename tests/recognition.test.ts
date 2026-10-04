@@ -406,8 +406,9 @@ describe('classifyOperator – "=" equals', () => {
     const g = makeGroup([hLine(10,60,20,0), hLine(10,60,32,200)]);
     expect(classifyOperator(g, MEDIAN_H)?.symbol).toBe('=');
   });
-  it('two bars too far apart vertically → NOT "="', () => {
-    const g = makeGroup([hLine(10,60,20,0), hLine(10,60,80,200)]);
+  it('two bars absurdly far apart vertically (gap > 2x width) → NOT "="', () => {
+    // bar width = 50px (x=[10,60]), gap = 150px — far beyond 2x width limit
+    const g = makeGroup([hLine(10,60,20,0), hLine(10,60,170,200)]);
     const r = classifyOperator(g, MEDIAN_H);
     if (r) expect(r.symbol).not.toBe('=');
   });
@@ -449,8 +450,9 @@ describe('classifyOperator – confusion cases', () => {
     expect(classifyOperator(makeGroup([vLine(30,0,50)]), MEDIAN_H)?.symbol).not.toBe('−');
   });
 
-  it('"=" vs two far-apart minus signs: wide vert gap → NOT "="', () => {
-    const g = makeGroup([hLine(10,60,10,0), hLine(10,60,70,200)]);
+  it('"=" vs two far-apart minus signs: gap > 2x bar width → NOT "="', () => {
+    // bar width = 50px (x=[10,60]), gap = 160px — far beyond 2x width = 100px
+    const g = makeGroup([hLine(10,60,10,0), hLine(10,60,170,200)]);
     const r = classifyOperator(g, MEDIAN_H);
     if (r) expect(r.symbol).not.toBe('=');
   });
