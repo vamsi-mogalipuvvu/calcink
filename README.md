@@ -130,6 +130,17 @@ A single small, license-clear, browser-ready model covering digits plus `+ - x /
 | TrOCR math variants | Varies | Around 2.4 GB for some variants, far too large for this client-side/offline scope. |
 | Plain MNIST/EMNIST models | Varies | Digits or letters only; MNIST-12 is the smallest and best documented digit-only option already available in ONNX format. |
 
+## Experimental CoMER Mode (Blocked)
+
+An experimental recognition mode based on the [ink-on](https://github.com/kimseungdae/ink-on) project (CoMER INT8 ONNX, ECCV 2022) was investigated to provide a unified end-to-end recognition pipeline. 
+
+The implementation requires the following local assets to be present in `public/models/comer/`:
+- `encoder_int8.onnx` (~3.4 MB)
+- `decoder_int8.onnx` (~4.0 MB)
+- `vocab.json`
+
+Because the project mandates 100% offline operation and zero network runtime dependency, these assets cannot be downloaded on the fly from Hugging Face or GitHub at runtime. As the assets are currently missing from the repository, the integration is halted. Safe, non-ML supporting logic (such as LaTeX to arithmetic normalization) has been added and tested, but the CoMER ONNX execution path will not be built until the physical model weights are provided locally.
+
 ## Testing
 
 Latest required verification: 143 tests passed.
