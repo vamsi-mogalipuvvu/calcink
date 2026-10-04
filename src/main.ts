@@ -25,9 +25,11 @@ import type { ToolMode } from './canvas/inkCanvas.js';
 import { AnswerOverlay } from './canvas/answerOverlay.js';
 import { getRecognitionBridge } from './recognition/index.js';
 import type { DebugGroup } from './recognition/index.js';
+import { getComerBridge } from './recognition/comerBridge.js';
+import { findEqualAnchor } from './recognition/equalAnchor.js';
 import { computeAnswers } from './recognition/answers.js';
 import { groupStrokes } from './recognition/grouper.js';
-import { evaluate } from './math/evaluator.js';
+import { evaluate, formatResult } from './math/evaluator.js';
 import type { Stroke } from './canvas/stroke.js';
 import { buzz, chime, haptic, isFeedbackEnabled, setFeedbackEnabled, swish } from './ui/feedback.js';
 
@@ -54,6 +56,7 @@ const btnStrokeEraser   = getEl<HTMLButtonElement>('btn-stroke-eraser');
 const btnPixelEraser    = getEl<HTMLButtonElement>('btn-pixel-eraser');
 const btnSound          = getEl<HTMLButtonElement>('btn-sound');
 const btnConfidence     = getEl<HTMLButtonElement>('btn-confidence');
+const btnComerToggle    = getEl<HTMLButtonElement>('btn-comer-toggle');
 const btnClear          = getEl<HTMLButtonElement>('btn-clear');
 const strokeWidthInput  = getEl<HTMLInputElement>('stroke-width');
 const strokeWidthVal    = getEl<HTMLSpanElement>('stroke-width-val');
@@ -63,9 +66,10 @@ const statusStrokes     = getEl<HTMLSpanElement>('status-strokes');
 const statusHint        = getEl<HTMLSpanElement>('status-hint');
 
 let confidenceEnabled = true;
+let comerEnabled = false;
 let pointerActive = false;
 let lastAnswerSignature = '';
-let lastRecognition: { expression: string; debug: DebugGroup[]; strokes: Stroke[] } | null = null;
+let lastRecognition: { expression: string; debug: DebugGroup[]; strokes: Stroke[]; comer?: boolean } | null = null;
 
 // ── Initialise subsystems ─────────────────────────────────────
 
@@ -104,6 +108,7 @@ resizeObserver.observe(containerEl);
 // ── Recognition worker ────────────────────────────────────────
 
 const bridge = getRecognitionBridge();
+const comerBridge = getComerBridge();
 
 bridge.onReady = () => {
   statusHint.textContent = '✨ Write a math expression ending with = and CalcInk will answer! Tip: scribble over ink to erase it.';
@@ -136,25 +141,50 @@ function scheduleRecognition(strokes: Stroke[]): void {
 
   debounceTimer = setTimeout(async () => {
     debounceTimer = null;
-    if (!bridge.isReady) {
-      setStatus('Loading model…', true);
-      return;
-    }
-    try {
-      const penWidth = parseFloat(strokeWidthInput.value);
-      const result   = await bridge.recognize(strokes, penWidth);
-      lastRecognition = { expression: result.expression, debug: result.debug, strokes };
-      updateDebugPanel(result.expression, result.debug);
-      processExpression(result.expression, result.debug, strokes);
-      setStatus('', false);
-    } catch (err) {
-      // Cancelled — a newer request is in flight; suppress
-      if (!(err instanceof Error && err.message === 'Cancelled')) {
-        console.warn('[CalcInk] Recognition error:', err);
+    if (comerEnabled) {
+      if (!comerBridge.isReady()) {
+        setStatus('Loading CoMER model…', true);
+        return;
+      }
+      try {
+        const penWidth = parseFloat(strokeWidthInput.value);
+        const result = await comerBridge.recognize(strokes, penWidth, 'number');
+        
+        lastRecognition = { expression: result.expressionResult.ok ? result.expressionResult.expression : '?', debug: [], strokes, comer: true };
+        updateDebugPanelForComer(result.latex, result.expressionResult.ok ? result.expressionResult.expression : `Error: ${result.expressionResult.error}`);
+        processComerExpression(result, strokes);
         setStatus('', false);
+      } catch (err) {
+        if (!(err instanceof Error && err.message === 'Cancelled')) {
+          console.warn('[CalcInk] CoMER Recognition error:', err);
+          setStatus('', false);
+        }
+      }
+    } else {
+      if (!bridge.isReady) {
+        setStatus('Loading model…', true);
+        return;
+      }
+      try {
+        const penWidth = parseFloat(strokeWidthInput.value);
+        const result   = await bridge.recognize(strokes, penWidth);
+        lastRecognition = { expression: result.expression, debug: result.debug, strokes, comer: false };
+        updateDebugPanel(result.expression, result.debug);
+        processExpression(result.expression, result.debug, strokes);
+        setStatus('', false);
+      } catch (err) {
+        if (!(err instanceof Error && err.message === 'Cancelled')) {
+          console.warn('[CalcInk] Recognition error:', err);
+          setStatus('', false);
+        }
       }
     }
   }, DEBOUNCE_MS);
+}
+
+function updateDebugPanelForComer(latex: string, expr: string): void {
+  debugExprEl.textContent = expr || '—';
+  debugGroupsEl.textContent = `CoMER: ${latex}`;
 }
 
 // ── Debug panel ───────────────────────────────────────────────
@@ -206,6 +236,39 @@ function processExpression(
 
   answerOverlay.setAnswers(answers);
   answerOverlay.setMarks(confidenceEnabled ? marks : []);
+  maybePlayAnswerFeedback(answers);
+}
+
+function processComerExpression(result: import('./recognition/comer/types.js').ComerResult, strokes: Stroke[]): void {
+  if (!result.expressionResult.ok) {
+    answerOverlay.clear();
+    lastAnswerSignature = '';
+    return;
+  }
+  
+  const anchor = findEqualAnchor(strokes);
+  if (!anchor) {
+    answerOverlay.clear();
+    lastAnswerSignature = '';
+    return;
+  }
+
+  const ans = evaluate(result.expressionResult.expression);
+  const formattedAns = ans.ok ? formatResult(ans.value) : 'Undefined';
+  
+  const penWidth = parseFloat(strokeWidthInput.value);
+  const padding = penWidth * 3;
+  
+  const answers = [{
+    text: formattedAns,
+    x: anchor.maxX + padding,
+    y: anchor.minY,
+    width: anchor.maxX - anchor.minX,
+    symbolHeight: anchor.maxY - anchor.minY
+  }];
+
+  answerOverlay.setAnswers(answers);
+  answerOverlay.setMarks([]); // CoMER mode does not currently have per-symbol confidence marks
   maybePlayAnswerFeedback(answers);
 }
 
@@ -274,9 +337,23 @@ btnConfidence.addEventListener('click', () => {
   confidenceEnabled = !confidenceEnabled;
   setToggleState(btnConfidence, confidenceEnabled);
   if (!confidenceEnabled) answerOverlay.setMarks([]);
-  else if (lastRecognition) {
+  else if (lastRecognition && !lastRecognition.comer) {
     processExpression(lastRecognition.expression, lastRecognition.debug, lastRecognition.strokes);
   }
+});
+
+btnComerToggle.addEventListener('click', () => {
+  comerEnabled = !comerEnabled;
+  setToggleState(btnComerToggle, comerEnabled);
+  
+  if (comerEnabled) {
+    bridge.cancelPending();
+  } else {
+    comerBridge.cancelPending();
+  }
+  
+  const strokes = inkCanvas.getStrokes();
+  scheduleRecognition(strokes);
 });
 
 canvasEl.addEventListener('pointerdown', () => { pointerActive = true; });
@@ -295,7 +372,8 @@ btnClear.addEventListener('click', () => {
     answerOverlay.clear();
     setStatus('', false);
     lastRecognition = null;
-    updateDebugPanel('', []);
+    if (comerEnabled) updateDebugPanelForComer('', '');
+    else updateDebugPanel('', []);
     updateUndoRedoState();
   }
 });

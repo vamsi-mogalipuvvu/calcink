@@ -83,6 +83,14 @@ export class RecognitionBridge {
     return promise;
   }
 
+  cancelPending(): void {
+    for (const [id, { reject }] of this.pending) {
+      this.worker.postMessage({ type: 'CANCEL', id });
+      reject(new Error('Cancelled'));
+    }
+    this.pending.clear();
+  }
+
   destroy(): void {
     this.worker.terminate();
     this.pending.clear();
