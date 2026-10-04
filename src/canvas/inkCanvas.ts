@@ -23,6 +23,7 @@ import type { Stroke, Point } from './stroke.js';
 import { createStroke, densify } from './stroke.js';
 import { DrawHistory } from './history.js';
 import { isScratchGesture, strokesUnderScratch } from './scratch.js';
+import { canvasBackingSize, clientToCanvasPoint } from './coords.js';
 
 // ── Tool modes ────────────────────────────────────────────────
 export type ToolMode = 'pen' | 'stroke-eraser' | 'pixel-eraser';
@@ -186,8 +187,9 @@ export class InkCanvas {
     this.dpr = window.devicePixelRatio || 1;
 
     // Set physical pixel size
-    this.canvas.width  = Math.round(this.cssWidth  * this.dpr);
-    this.canvas.height = Math.round(this.cssHeight * this.dpr);
+    const backingSize = canvasBackingSize(this.cssWidth, this.cssHeight, this.dpr);
+    this.canvas.width  = backingSize.width;
+    this.canvas.height = backingSize.height;
 
     // CSS size stays at logical dimensions
     this.canvas.style.width  = `${this.cssWidth}px`;
@@ -207,9 +209,10 @@ export class InkCanvas {
    */
   private _toCanvasPoint(e: PointerEvent): Point {
     const rect = this.canvas.getBoundingClientRect();
+    const pt = clientToCanvasPoint(e.clientX, e.clientY, rect);
     return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
+      x: pt.x,
+      y: pt.y,
       t: e.timeStamp,
       pressure: e.pressure > 0 ? e.pressure : 0.5,
     };
