@@ -147,3 +147,7 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# tsc output — compiled JS files co-located with TypeScript sources
+src/**/*.js
+tests/**/*.js
