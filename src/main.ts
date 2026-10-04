@@ -93,7 +93,7 @@ resizeObserver.observe(containerEl);
 const bridge = getRecognitionBridge();
 
 bridge.onReady = () => {
-  statusHint.textContent = '✨ Write a math expression ending with = and CalcInk will answer!';
+  statusHint.textContent = '✨ Write a math expression ending with = and CalcInk will answer! Tip: scribble over ink to erase it.';
   setStatus('Model ready', false);
   setTimeout(() => setStatus('', false), 2000);
 };

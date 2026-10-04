@@ -22,6 +22,7 @@
 import type { Stroke, Point } from './stroke.js';
 import { createStroke, densify } from './stroke.js';
 import { DrawHistory } from './history.js';
+import { isScratchGesture, strokesUnderScratch } from './scratch.js';
 
 // ── Tool modes ────────────────────────────────────────────────
 export type ToolMode = 'pen' | 'stroke-eraser' | 'pixel-eraser';
@@ -33,6 +34,7 @@ export interface InkCanvasOptions {
   pixelEraserCursor: HTMLElement;
   onStrokesChange?: (strokes: Stroke[]) => void;
   onToolChange?: (tool: ToolMode) => void;
+  onScratchErase?: () => void;
 }
 
 export class InkCanvas {
@@ -77,6 +79,7 @@ export class InkCanvas {
   /** Callbacks */
   private onStrokesChange?: (strokes: Stroke[]) => void;
   private onToolChange?: (tool: ToolMode) => void;
+  private onScratchErase?: () => void;
 
   /** ResizeObserver to handle canvas container size changes */
   private resizeObserver: ResizeObserver;
@@ -89,6 +92,7 @@ export class InkCanvas {
     this.pixelEraserCursor = opts.pixelEraserCursor;
     this.onStrokesChange = opts.onStrokesChange;
     this.onToolChange = opts.onToolChange;
+    this.onScratchErase = opts.onScratchErase;
 
     const ctx = this.canvas.getContext('2d');
     if (!ctx) throw new Error('Cannot get 2D context from canvas');
@@ -271,6 +275,20 @@ export class InkCanvas {
     if (this._tool === 'pen' && this.activeStroke) {
       // Finalise the stroke
       if (this.activeStroke.points.length >= 1) {
+        const scratchIds = isScratchGesture(this.activeStroke.points)
+          ? strokesUnderScratch(this.activeStroke, this.strokes)
+          : [];
+        if (scratchIds.length > 0) {
+          const toRemove = new Set(scratchIds);
+          this.strokes = this.strokes.filter(stroke => !toRemove.has(stroke.id));
+          this.activeStroke = null;
+          this.lastDrawnIndex = 0;
+          this._redraw();
+          this.onStrokesChange?.(this.strokes);
+          this.onScratchErase?.();
+          e.preventDefault();
+          return;
+        }
         // Do a final full redraw so the committed stroke is pixel-perfect
         // (incremental tail may have left hairline gaps at segment joins)
         this.strokes.push(this.activeStroke);
