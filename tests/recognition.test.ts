@@ -24,6 +24,7 @@ import {
   bboxHeight,
   bboxesClose,
   horizOverlapRatio,
+  isFlat,
 } from '../src/recognition/grouper.js';
 import { classifyOperator } from '../src/recognition/operatorClassifier.js';
 import type { SymbolGroup, BBox } from '../src/recognition/grouper.js';
@@ -129,6 +130,56 @@ describe('groupStrokes – spatial-primary (new algorithm)', () => {
     const bar2 = hLine(10, 70, 32, 4500);
     const groups = groupStrokes([bar1, bar2]);
     expect(groups).toHaveLength(2);
+  });
+
+  // ── Real-world reproduction: 155 px bars, 100 px gap (BUG #1 numbers) ──
+  it('REAL-WORLD: "=" bars 155 px wide, 100 px apart, 2 s pause → 1 group', () => {
+    // Exactly what the user saw: debug showed −(1s@762) −(1s@765)
+    // bars ≈155 px wide, vertical gap ≈100 px.
+    // Old 55%-of-width rule: 0.55 × 155 = 85 < 100 → FAIL (bug).
+    // New Gate S: 1.5 × 155 = 232 ≥ 100 → PASS (fixed).
+    const bar1 = hLine(680, 835, 120, 0);      // ~155 px wide
+    const bar2 = hLine(680, 835, 220, 2000);   // 100 px lower, 2 s later
+    const groups = groupStrokes([bar1, bar2]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].strokes).toHaveLength(2);
+  });
+
+  it('REAL-WORLD: "=" bars 155 px wide, 300 px apart → 2 groups (too far)', () => {
+    // Vertical gap 300 px >> 1.5 × 155 = 232 px → must NOT merge
+    const bar1 = hLine(680, 835, 100, 0);
+    const bar2 = hLine(680, 835, 400, 1000);   // 300 px lower
+    const groups = groupStrokes([bar1, bar2]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it('post-pass: "=" bars escaped canMerge (sorted after grouping) → post-pass merges them', () => {
+    // Simulate the case where bars were written right-to-left so they
+    // ended up in different groups before the sort, then the post-pass
+    // should still merge them.
+    const bar1 = hLine(100, 255, 50, 500);   // written second (higher t)
+    const bar2 = hLine(100, 255, 65, 0);     // written first (lower t) — out of order
+    const groups = groupStrokes([bar1, bar2]);
+    // After time-sort, bar2 comes first, bar1 second.
+    // They overlap 100% horizontally, gap = 15px < 1.5 × 155 = 232 px → merge.
+    expect(groups).toHaveLength(1);
+  });
+
+  it('side-by-side "−" signs (no overlap) do NOT merge via post-pass', () => {
+    // e.g. "5−−3": two minus signs at different x positions, no horizontal overlap
+    const minus1 = hLine(10, 50, 30,    0);    // x=[10,50]
+    const minus2 = hLine(70, 110, 30, 300);    // x=[70,110] — no overlap with minus1
+    const groups = groupStrokes([minus1, minus2]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it('isFlat: flat bar returns true, tall stroke returns false', () => {
+    // flat: width=150, height=4
+    expect(isFlat({ minX: 0, maxX: 150, minY: 0, maxY: 4 })).toBe(true);
+    // tall: width=20, height=60
+    expect(isFlat({ minX: 0, maxX: 20, minY: 0, maxY: 60 })).toBe(false);
+    // square-ish: width=40, height=30 (h/w = 75%, not flat)
+    expect(isFlat({ minX: 0, maxX: 40, minY: 0, maxY: 30 })).toBe(false);
   });
 
   // ── "÷" with 1.5-second pauses ────────────────────────────

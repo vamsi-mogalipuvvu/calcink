@@ -53,6 +53,13 @@ export class InkCanvas {
   /** The stroke currently being drawn (null when not drawing) */
   private activeStroke: Stroke | null = null;
 
+  /**
+   * Index of the last point that has already been painted incrementally.
+   * Reset to 0 on pointerdown so the full stroke is always reachable.
+   * Incremented in _drawActiveStrokeTail after each batch of new points.
+   */
+  private lastDrawnIndex = 0;
+
   /** Undo/redo history */
   private history = new DrawHistory();
 
@@ -219,6 +226,7 @@ export class InkCanvas {
       this.history.push(this.strokes);
       this.activeStroke = createStroke(this.penWidth, this.penColor);
       this.activeStroke.points.push(pt);
+      this.lastDrawnIndex = 0; // reset tail-draw cursor
     } else if (this._tool === 'stroke-eraser') {
       this._eraseStrokeAt(pt);
     } else if (this._tool === 'pixel-eraser') {
@@ -259,13 +267,17 @@ export class InkCanvas {
     if (this._tool === 'pen' && this.activeStroke) {
       // Finalise the stroke
       if (this.activeStroke.points.length >= 1) {
+        // Do a final full redraw so the committed stroke is pixel-perfect
+        // (incremental tail may have left hairline gaps at segment joins)
         this.strokes.push(this.activeStroke);
+        this._redraw();
         this.onStrokesChange?.(this.strokes);
       } else {
         // Single-point: discard (history was pushed prematurely, pop it back)
         this.history.undo(this.strokes);
       }
       this.activeStroke = null;
+      this.lastDrawnIndex = 0;
     }
     e.preventDefault();
   };
@@ -410,12 +422,18 @@ export class InkCanvas {
   }
 
   /**
-   * Incrementally draw just the newly added tail of the active stroke.
-   * This avoids a full redraw on every pointer move → 60 FPS drawing.
-   * We draw the last three points so the curve segment joins smoothly.
+   * Incrementally draw ALL newly-added tail points of the active stroke.
+   *
+   * Key insight: coalesced pointer events can add N points per JS frame.
+   * We must draw ALL segments from `lastDrawnIndex` to the current end,
+   * not just the last one — otherwise fast strokes show gaps/dashes.
+   *
+   * We use midpoint Bézier smoothing, starting from the midpoint BEFORE
+   * lastDrawnIndex so each call seamlessly continues the previous segment.
    */
   private _drawActiveStrokeTail(stroke: Stroke): void {
     const pts = stroke.points;
+    // Need at least 2 points to draw anything
     if (pts.length < 2) return;
 
     const { ctx } = this;
@@ -424,24 +442,49 @@ export class InkCanvas {
     ctx.lineWidth   = stroke.width;
     ctx.lineCap     = 'round';
     ctx.lineJoin    = 'round';
+
+    // The segment we resume from.
+    // If lastDrawnIndex >= 1 we start at the midpoint of [last-1, last],
+    // which is where the previous call ended its quadraticCurveTo.
+    // If this is the very first segment (lastDrawnIndex === 0) start at pts[0].
+    const resumeFrom = Math.max(1, this.lastDrawnIndex);
+
     ctx.beginPath();
 
-    if (pts.length === 2) {
-      // Very start of stroke
+    if (resumeFrom === 1 && pts.length === 2) {
+      // Only 2 points total — just a line from 0 to 1
       ctx.moveTo(pts[0].x, pts[0].y);
       ctx.lineTo(pts[1].x, pts[1].y);
-    } else {
-      // Take the last 3 points to render the smooth segment
-      const i = pts.length - 2;
-      const mx = (pts[i].x + pts[i + 1].x) / 2;
-      const my = (pts[i].y + pts[i + 1].y) / 2;
-      const prevMx = (pts[i - 1].x + pts[i].x) / 2;
-      const prevMy = (pts[i - 1].y + pts[i].y) / 2;
-      ctx.moveTo(prevMx, prevMy);
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+      ctx.stroke();
+      this.lastDrawnIndex = 1;
+      ctx.restore();
+      return;
     }
 
+    // Start the path at the midpoint before resumeFrom so it joins smoothly
+    if (resumeFrom >= 2) {
+      const mx = (pts[resumeFrom - 2].x + pts[resumeFrom - 1].x) / 2;
+      const my = (pts[resumeFrom - 2].y + pts[resumeFrom - 1].y) / 2;
+      ctx.moveTo(mx, my);
+    } else {
+      ctx.moveTo(pts[0].x, pts[0].y);
+    }
+
+    // Draw ALL segments from resumeFrom up to (but not including) the last point
+    // using quadratic midpoint smoothing
+    for (let i = resumeFrom; i < pts.length - 1; i++) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2;
+      const my = (pts[i].y + pts[i + 1].y) / 2;
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+    }
+    // Draw to the actual last point
+    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+
     ctx.stroke();
+
+    // Advance the drawn cursor to second-to-last point
+    // (last point will be the start of the NEXT call's path)
+    this.lastDrawnIndex = pts.length - 1;
     ctx.restore();
   }
 

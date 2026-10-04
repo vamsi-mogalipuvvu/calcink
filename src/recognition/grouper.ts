@@ -161,21 +161,54 @@ function verticalGap(gBbox: BBox, sBbox: BBox): number {
 }
 
 /**
+ * Returns true if the stroke's bbox is "flat" (height < 25% of width).
+ * Used to identify horizontal bars like the arms of "−" and "=".
+ */
+export function isFlat(bbox: BBox): boolean {
+  const w = bboxWidth(bbox);
+  const h = bboxHeight(bbox);
+  return w > 4 && h < w * 0.25;
+}
+
+/**
  * Decide whether an incoming stroke should merge into an existing group.
  *
- * Rule: SPATIAL overlap is required (Gate A). Time is a secondary guard only.
+ * Two gates are checked in order; the first one that PASSES wins:
+ *
+ * Gate S (stacked flat strokes — for "="):
+ *   Both the group AND the new stroke are flat (height < 25% of width),
+ *   widths are similar (narrower / wider > 0.5), horizontal overlap ≥ 60%
+ *   of the narrower width, and the vertical gap is ≤ 1.5× the wider width.
+ *   This handles real-world "=" where bars can be 100+ px apart vertically
+ *   while the default Gate G would reject them (55% of 155px = 85px < 100px).
+ *
+ * Gate G (general spatial gate — for +, ×, ÷, etc.):
+ *   Horizontal overlap ≥ MIN_HORIZ_OVERLAP_RATIO of narrower width,
+ *   vertical gap ≤ MAX_VERT_GAP_RATIO × max(groupW, strokeW).
  */
 function canMerge(group: SymbolGroup, sBbox: BBox, sStart: number): boolean {
   // Guard: too old
   if (sStart - group.endTime > MAX_TIME_SPATIAL_MS) return false;
 
-  // Gate A: horizontal overlap
-  const hRatio = horizOverlapRatio(group.bbox, sBbox);
-  if (hRatio < MIN_HORIZ_OVERLAP_RATIO) return false;
+  const gBbox  = group.bbox;
+  const hRatio = horizOverlapRatio(gBbox, sBbox);
+  const vGap   = verticalGap(gBbox, sBbox);
 
-  // Gate B: vertical proximity (relative to the wider dimension)
-  const refWidth = Math.max(bboxWidth(group.bbox), bboxWidth(sBbox), 10);
-  const vGap     = verticalGap(group.bbox, sBbox);
+  // Gate S: stacked flat strokes (the "=" case)
+  if (isFlat(gBbox) && isFlat(sBbox)) {
+    const gW     = bboxWidth(gBbox);
+    const sW     = bboxWidth(sBbox);
+    const wider  = Math.max(gW, sW);
+    const narrower = Math.min(gW, sW);
+    const widthSimilar  = narrower / wider > 0.5;         // widths are comparable
+    const overlapOk     = hRatio >= 0.60;                 // strong horizontal overlap
+    const vertGapOk     = vGap <= wider * 1.5;            // up to 1.5× wider stroke's width
+    if (widthSimilar && overlapOk && vertGapOk) return true;
+  }
+
+  // Gate G: general spatial gate (for +, ×, ÷, and also catches close-together "=")
+  if (hRatio < MIN_HORIZ_OVERLAP_RATIO) return false;
+  const refWidth = Math.max(bboxWidth(gBbox), bboxWidth(sBbox), 10);
   return vGap <= refWidth * MAX_VERT_GAP_RATIO;
 }
 
@@ -241,7 +274,63 @@ export function groupStrokes(strokes: Stroke[]): SymbolGroup[] {
 
   // Sort left-to-right by horizontal centre
   groups.sort((a, b) => a.cx - b.cx);
+
+  // Post-pass: merge consecutive groups that are both single flat strokes
+  // with strong horizontal overlap. This catches "=" bars that were written
+  // with a pause long enough to start a new group, or that the vertical gap
+  // slightly exceeded the general gate but are clearly the same symbol.
+  mergeConsecutiveFlatGroups(groups);
+
   return groups;
+}
+
+/**
+ * Post-pass: scan left-to-right and merge adjacent groups when:
+ *  - Each group contains exactly ONE stroke
+ *  - Both strokes are flat (height < 25% of their own width)
+ *  - Horizontal overlap ≥ 60% of the narrower bbox
+ *  - Vertical gap ≤ 1.5× the wider bbox width
+ *
+ * This is the safety-net for "=" bars that escaped canMerge due to
+ * timing or grouper ordering.
+ *
+ * Side-by-side "−" signs (no horizontal overlap) are NOT affected because
+ * the overlap gate (60%) rejects them.
+ */
+function mergeConsecutiveFlatGroups(groups: SymbolGroup[]): void {
+  let i = 0;
+  while (i < groups.length - 1) {
+    const a = groups[i];
+    const b = groups[i + 1];
+
+    // Both must be single-stroke flat groups
+    if (a.strokes.length !== 1 || b.strokes.length !== 1) { i++; continue; }
+    if (!isFlat(a.bbox) || !isFlat(b.bbox)) { i++; continue; }
+
+    // Time guard: respect the same 4 s limit as canMerge
+    const timeDiff = Math.abs(b.startTime - a.endTime);
+    if (timeDiff > MAX_TIME_SPATIAL_MS) { i++; continue; }
+
+    // Horizontal overlap
+    const overlap = horizOverlapRatio(a.bbox, b.bbox);
+    if (overlap < 0.60) { i++; continue; }
+
+    // Vertical gap
+    const vGap  = verticalGap(a.bbox, b.bbox);
+    const wider = Math.max(bboxWidth(a.bbox), bboxWidth(b.bbox));
+    if (vGap > wider * 1.5) { i++; continue; }
+
+    // Merge b into a
+    a.strokes.push(...b.strokes);
+    a.bbox    = mergeBBox(a.bbox, b.bbox);
+    a.cx      = (a.bbox.minX + a.bbox.maxX) / 2;
+    a.cy      = (a.bbox.minY + a.bbox.maxY) / 2;
+    a.endTime = Math.max(a.endTime, b.endTime);
+
+    // Remove b
+    groups.splice(i + 1, 1);
+    // Don't advance i — allow chaining (three or more stacked bars)
+  }
 }
 
 // ── Line splitter ──────────────────────────────────────────────
