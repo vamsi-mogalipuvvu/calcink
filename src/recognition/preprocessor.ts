@@ -20,7 +20,7 @@
  * OffscreenCanvas, which is available in workers).
  */
 
-import type { Stroke } from '../canvas/stroke.js';
+import type { Stroke, Point } from '../canvas/stroke.js';
 import type { BBox } from './grouper.js';
 
 // ── Constants ─────────────────────────────────────────────────
@@ -28,6 +28,45 @@ import type { BBox } from './grouper.js';
 const MODEL_SIZE = 28;     // MNIST input: 28×28
 const RENDER_SIZE = 112;   // Render at 4× then downscale for better quality
 const PADDING_FRACTION = 0.15; // 15% padding around the digit
+
+/** Light moving-average smoothing to remove mouse jitter (2 passes). */
+export function smooth(pts: Point[]): Point[] {
+  if (pts.length < 5) return pts;
+  let cur = pts;
+  for (let pass = 0; pass < 2; pass++) {
+    const prev = cur;
+    cur = prev.map((p, i) =>
+      i === 0 || i === prev.length - 1
+        ? p
+        : { ...p, x: (prev[i - 1].x + p.x + prev[i + 1].x) / 3,
+                  y: (prev[i - 1].y + p.y + prev[i + 1].y) / 3 });
+  }
+  return cur;
+}
+
+/** Shift the 28x28 image so its center of mass sits at the middle (MNIST convention). */
+export function centerByMass(t: Float32Array): Float32Array {
+  const N = 28;
+  let sum = 0, mx = 0, my = 0;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const v = t[y * N + x];
+      sum += v; mx += v * x; my += v * y;
+    }
+  }
+  if (sum < 1e-3) return t;
+  const dx = Math.round(13.5 - mx / sum);
+  const dy = Math.round(13.5 - my / sum);
+  if (dx === 0 && dy === 0) return t;
+  const out = new Float32Array(N * N);
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < N && ny >= 0 && ny < N) out[ny * N + nx] = t[y * N + x];
+    }
+  }
+  return out;
+}
 
 // ── Render helpers ────────────────────────────────────────────
 
@@ -67,7 +106,7 @@ function renderStrokesToCtx(
   ctx.lineJoin    = 'round';
 
   for (const stroke of strokes) {
-    const pts = stroke.points;
+    const pts = smooth(stroke.points);
     if (pts.length === 0) continue;
 
     ctx.beginPath();
@@ -122,16 +161,16 @@ export function preprocessSymbol(
   penWidth: number,
   debug = false,
 ): PreprocessResult {
+  void debug;
   // Step 1: Render at RENDER_SIZE (4× model size) for quality
   const renderCanvas = new OffscreenCanvas(RENDER_SIZE, RENDER_SIZE);
   const renderCtx    = renderCanvas.getContext('2d');
   if (!renderCtx) throw new Error('Could not get OffscreenCanvas 2D context');
 
-  // Scale pen width proportionally
-  const scaledPenWidth = Math.max(
-    2,
-    (penWidth / Math.max(bbox.maxX - bbox.minX, bbox.maxY - bbox.minY, 1)) * RENDER_SIZE * 0.12,
-  );
+  // MNIST strokes are ~2.5px thick on a 28px image, i.e. ~10% of the cell.
+  // Fixed fraction of the render size, independent of pen width and digit size.
+  void penWidth;
+  const scaledPenWidth = RENDER_SIZE * 0.10;
 
   renderStrokesToCtx(renderCtx, strokes, bbox, RENDER_SIZE, scaledPenWidth);
 
@@ -139,6 +178,8 @@ export function preprocessSymbol(
   const modelCanvas = new OffscreenCanvas(MODEL_SIZE, MODEL_SIZE);
   const modelCtx    = modelCanvas.getContext('2d');
   if (!modelCtx) throw new Error('Could not get model canvas context');
+  modelCtx.imageSmoothingEnabled = true;
+  modelCtx.imageSmoothingQuality = 'high';
   modelCtx.drawImage(renderCanvas, 0, 0, MODEL_SIZE, MODEL_SIZE);
 
   // Step 3: Extract pixel data and build Float32 tensor
@@ -151,7 +192,7 @@ export function preprocessSymbol(
   }
 
   return {
-    tensor,
+    tensor: centerByMass(tensor),
     // debugDataUrl omitted — OffscreenCanvas.toDataURL not supported in workers
   };
 }

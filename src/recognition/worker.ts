@@ -23,6 +23,7 @@ import type { Stroke } from '../canvas/stroke.js';
 import { groupStrokes, bboxHeight } from './grouper.js';
 import { classifyOperator } from './operatorClassifier.js';
 import { preprocessSymbol } from './preprocessor.js';
+import { strayDotMask } from './postprocess.js';
 
 // ── ORT WASM path config ─────────────────────────────────────────────────────
 // We use the /ort-wasm/ path in public/ (bundled locally, no network needed).
@@ -177,7 +178,10 @@ async function recognizeStrokes(
 
     if (currentJobId !== id) return;
 
-    self.postMessage({ type: 'RESULT', id, expression: symbols.join(''), debug });
+    const keep = strayDotMask(symbols);
+    const finalSymbols = symbols.filter((_, i) => keep[i]);
+    const finalDebug   = debug.filter((_, i) => keep[i]);
+    self.postMessage({ type: 'RESULT', id, expression: finalSymbols.join(''), debug: finalDebug });
   } catch (err) {
     if (currentJobId === id) {
       self.postMessage({ type: 'ERROR', id, message: String(err) });
