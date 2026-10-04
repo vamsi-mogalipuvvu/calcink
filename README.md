@@ -3,7 +3,7 @@
 CalcInk is an on-device handwritten arithmetic notebook: users draw an expression with mouse, touch, or stylus, end it with `=`, and the app recognizes the strokes, evaluates the expression, and renders the answer inline on the canvas. It is built for the Inter IIT Tech Meet Bootcamp Phase 1 Software PS and runs fully client-side/offline after the app assets are loaded.
 
 - Repository: https://github.com/vamsi-mogalipuvvu/calcink
-- Live demo: `<LIVE_DEMO_URL>`
+- Live demo: `https://calcink-three.vercel.app`
 - License: MIT
 
 ## Quick Start
