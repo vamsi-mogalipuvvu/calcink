@@ -6,6 +6,7 @@ Built for the Inter IIT Tech Meet Bootcamp Phase 1 Software PS, it operates **10
 
 - Repository: https://github.com/vamsi-mogalipuvvu/calcink
 - Live demo: `https://calcink-three.vercel.app`
+- Demo Video: [Watch on Google Drive](https://drive.google.com/file/d/1aM3xWqZUA6y-FmGY8EN8sJAQNN3y6846/view?usp=sharing)
 - License: MIT
 
 ## Quick Start
