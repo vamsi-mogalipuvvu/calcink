@@ -7,8 +7,6 @@
 :root {
   /* Paper palette */
   --paper-bg: #fafaf7;
-  --paper-line: #c8d8e8;
-  --paper-margin: #e8a0a0;
   --paper-shadow: rgba(0, 0, 0, 0.08);
 
   /* Brand / accent */
@@ -283,19 +281,6 @@ input[type='range']#stroke-width:hover::-webkit-slider-thumb {
   position: relative;
   overflow: hidden;
   background: var(--paper-bg);
-
-  /* Notebook lines via CSS gradient */
-  background-image:
-    /* Red margin line at ~60px from left */
-    linear-gradient(to right, transparent 59px, var(--paper-margin) 59px, var(--paper-margin) 60px, transparent 60px),
-    /* Horizontal ruled lines every 32px */
-    repeating-linear-gradient(
-      to bottom,
-      transparent 0px,
-      transparent 31px,
-      var(--paper-line) 31px,
-      var(--paper-line) 32px
-    );
 
   /* Subtle paper texture shadow at left */
   box-shadow: inset 4px 0 12px rgba(0, 0, 0, 0.04);
